@@ -3,12 +3,52 @@ from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import func, or_
 import math
 import os
+import logging
+from logging.handlers import RotatingFileHandler
+import sys
 
 app = Flask(__name__)
 
+# Configure logging
+def setup_logging():
+    """Configure application logging with both file and console handlers."""
+    # Create logs directory if it doesn't exist
+    if not os.path.exists('logs'):
+        os.mkdir('logs')
+    
+    # Set up file handler with rotation
+    file_handler = RotatingFileHandler(
+        'logs/golfcourse_api.log',
+        maxBytes=10240000,  # 10MB
+        backupCount=10
+    )
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+    ))
+    file_handler.setLevel(logging.INFO)
+    
+    # Set up console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s: %(message)s'
+    ))
+    console_handler.setLevel(logging.INFO)
+    
+    # Configure app logger
+    app.logger.addHandler(file_handler)
+    app.logger.addHandler(console_handler)
+    app.logger.setLevel(logging.INFO)
+    
+    app.logger.info('Golf Course API startup')
+
+setup_logging()
+
 # Database configuration
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///golfcourses.db')
+database_url = os.environ.get('DATABASE_URL', 'sqlite:///golfcourses.db')
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+app.logger.info(f'Configuring database connection: {database_url}')
 
 db = SQLAlchemy(app)
 
@@ -54,6 +94,7 @@ def calculate_distance(lat1, lon1, lat2, lon2):
 
 @app.route("/")
 def hello_world():
+    app.logger.info('Root endpoint accessed')
     return "Golf Course Search API - Use /search endpoint"
 
 @app.route("/search", methods=['GET', 'POST'])
@@ -66,12 +107,19 @@ def search_courses():
     - name: Search by course name
     - limit: Number of results to return (default: 10)
     """
+    request_id = request.headers.get('X-Request-ID', 'N/A')
+    client_ip = request.remote_addr
+    
+    app.logger.info(f'Search request received - Method: {request.method}, IP: {client_ip}, Request-ID: {request_id}')
+    
     try:
         # Get parameters from query string or JSON body
         if request.method == 'POST':
             data = request.get_json() or {}
+            app.logger.info(f'POST request with JSON body: {data}')
         else:
             data = request.args.to_dict()
+            app.logger.info(f'GET request with query params: {data}')
         
         lat = data.get('lat')
         lng = data.get('lng')
@@ -79,6 +127,8 @@ def search_courses():
         zipcode = data.get('zipcode')
         name = data.get('name')
         limit = int(data.get('limit', 10))
+        
+        app.logger.info(f'Search parameters - lat: {lat}, lng: {lng}, city: {city}, zipcode: {zipcode}, name: {name}, limit: {limit}')
         
         query = GolfCourse.query
         
@@ -88,8 +138,13 @@ def search_courses():
                 lat = float(lat)
                 lng = float(lng)
                 
+                app.logger.info(f'Performing location-based search at coordinates: ({lat}, {lng})')
+                
                 # Get all courses and calculate distances
+                app.logger.info('Querying database for all golf courses')
                 courses = query.all()
+                app.logger.info(f'Retrieved {len(courses)} courses from database')
+                
                 courses_with_distance = []
                 
                 for course in courses:
@@ -106,6 +161,10 @@ def search_courses():
                 courses_with_distance.sort(key=lambda x: x['distance_miles'])
                 results = courses_with_distance[:limit]
                 
+                app.logger.info(f'Location search completed - Found {len(results)} courses within search criteria')
+                if results:
+                    app.logger.info(f'Nearest course: {results[0]["name"]} at {results[0]["distance_miles"]} miles')
+                
                 return jsonify({
                     'success': True,
                     'search_type': 'location',
@@ -114,7 +173,8 @@ def search_courses():
                     'total_found': len(results)
                 })
                 
-            except ValueError:
+            except ValueError as ve:
+                app.logger.error(f'Invalid coordinate values - lat: {lat}, lng: {lng}, error: {str(ve)}')
                 return jsonify({
                     'success': False,
                     'error': 'Invalid latitude or longitude values'
@@ -122,6 +182,7 @@ def search_courses():
         
         # Search by city name
         elif city:
+            app.logger.info(f'Performing city-based search for: {city}')
             query = query.filter(
                 or_(
                     GolfCourse.address.ilike(f'%{city}%'),
@@ -129,6 +190,10 @@ def search_courses():
                 )
             )
             results = query.limit(limit).all()
+            
+            app.logger.info(f'City search completed - Found {len(results)} courses matching "{city}"')
+            if results:
+                app.logger.info(f'Sample results: {[course.name for course in results[:3]]}')
             
             return jsonify({
                 'success': True,
@@ -140,8 +205,13 @@ def search_courses():
         
         # Search by zipcode
         elif zipcode:
+            app.logger.info(f'Performing zipcode-based search for: {zipcode}')
             query = query.filter(GolfCourse.address.ilike(f'%{zipcode}%'))
             results = query.limit(limit).all()
+            
+            app.logger.info(f'Zipcode search completed - Found {len(results)} courses matching "{zipcode}"')
+            if results:
+                app.logger.info(f'Sample results: {[course.name for course in results[:3]]}')
             
             return jsonify({
                 'success': True,
@@ -153,8 +223,13 @@ def search_courses():
         
         # Search by course name
         elif name:
+            app.logger.info(f'Performing name-based search for: {name}')
             query = query.filter(GolfCourse.name.ilike(f'%{name}%'))
             results = query.limit(limit).all()
+            
+            app.logger.info(f'Name search completed - Found {len(results)} courses matching "{name}"')
+            if results:
+                app.logger.info(f'Sample results: {[course.name for course in results[:3]]}')
             
             return jsonify({
                 'success': True,
@@ -165,17 +240,35 @@ def search_courses():
             })
         
         else:
+            app.logger.warning(f'Search request missing required parameters - Provided data: {data}')
             return jsonify({
                 'success': False,
                 'error': 'Please provide one of: lat/lng, city, zipcode, or name'
             }), 400
             
     except Exception as e:
+        app.logger.error(f'Unexpected error in search endpoint: {str(e)}', exc_info=True)
         return jsonify({
             'success': False,
             'error': str(e)
         }), 500
 
 # Create database tables
-with app.app_context():
-    db.create_all()
+try:
+    with app.app_context():
+        app.logger.info('Attempting to create database tables')
+        db.create_all()
+        
+        # Log database connection test
+        try:
+            course_count = GolfCourse.query.count()
+            app.logger.info(f'Database connection successful - Total courses in database: {course_count}')
+        except Exception as e:
+            app.logger.error(f'Database connection test failed: {str(e)}', exc_info=True)
+            
+except Exception as e:
+    app.logger.error(f'Failed to initialize database: {str(e)}', exc_info=True)
+
+if __name__ == '__main__':
+    app.logger.info('Starting Flask development server')
+    app.run(debug=True)
