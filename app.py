@@ -43,7 +43,7 @@ def setup_logging():
 setup_logging()
 
 # Database configuration
-DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///golfcourses.db')
+DATABASE_URL = os.environ.get('DATABASE_URL')
 app.logger.info(f'Configuring database connection: {DATABASE_URL}')
 
 # Parse DATABASE_URL to extract SQLite database path
@@ -317,4 +317,5 @@ if init_db():
 
 if __name__ == '__main__':
     app.logger.info('Starting Flask development server')
+    app.logger.info('DATABASE_URL: {os.environ.get('DATABASE_URL')})
     app.run(debug=True)
