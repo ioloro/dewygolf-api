@@ -43,15 +43,46 @@ def setup_logging():
 setup_logging()
 
 # Database configuration
-DATABASE = os.environ.get('DATABASE_PATH', 'golfcourses.db')
-app.logger.info(f'Configuring database connection: {DATABASE}')
+DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///golfcourses.db')
+app.logger.info(f'Configuring database connection: {DATABASE_URL}')
+
+# Parse DATABASE_URL to determine database type and path
+if DATABASE_URL.startswith('sqlite'):
+    # Handle SQLite URLs (sqlite:///path or sqlite://path)
+    DATABASE = DATABASE_URL.replace('sqlite:///', '').replace('sqlite://', '')
+    DB_TYPE = 'sqlite'
+    app.logger.info(f'Using SQLite database: {DATABASE}')
+elif DATABASE_URL.startswith('postgresql') or DATABASE_URL.startswith('postgres'):
+    # PostgreSQL connection - will need psycopg2
+    DATABASE = DATABASE_URL
+    DB_TYPE = 'postgresql'
+    app.logger.info('Using PostgreSQL database')
+else:
+    # Default to SQLite if format is unclear
+    DATABASE = DATABASE_URL if DATABASE_URL else 'golfcourses.db'
+    DB_TYPE = 'sqlite'
+    app.logger.info(f'Using SQLite database (default): {DATABASE}')
 
 def get_db():
     """Get database connection for the current request."""
     db = getattr(g, '_database', None)
     if db is None:
-        db = g._database = sqlite3.connect(DATABASE)
-        db.row_factory = sqlite3.Row
+        if DB_TYPE == 'postgresql':
+            try:
+                import psycopg2
+                import psycopg2.extras
+                db = g._database = psycopg2.connect(DATABASE)
+                app.logger.info('PostgreSQL connection established')
+            except ImportError:
+                app.logger.error('psycopg2 not installed. Install with: pip install psycopg2-binary')
+                raise
+            except Exception as e:
+                app.logger.error(f'Failed to connect to PostgreSQL: {str(e)}', exc_info=True)
+                raise
+        else:
+            db = g._database = sqlite3.connect(DATABASE)
+            db.row_factory = sqlite3.Row
+            app.logger.debug('SQLite connection established')
     return db
 
 @app.teardown_appcontext
@@ -64,26 +95,49 @@ def close_connection(exception):
 def init_db():
     """Initialize the database with required tables."""
     try:
-        conn = sqlite3.connect(DATABASE)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS golfcourse (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                latitude REAL NOT NULL,
-                longitude REAL NOT NULL,
-                address TEXT,
-                website TEXT,
-                phone TEXT,
-                timezone TEXT,
-                uuid TEXT DEFAULT 'constant'
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
-        app.logger.info('Database tables created successfully')
+        if DB_TYPE == 'postgresql':
+            import psycopg2
+            conn = psycopg2.connect(DATABASE)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS golfcourse (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    latitude REAL NOT NULL,
+                    longitude REAL NOT NULL,
+                    address TEXT,
+                    website TEXT,
+                    phone TEXT,
+                    timezone TEXT,
+                    uuid TEXT DEFAULT 'constant'
+                )
+            ''')
+            
+            conn.commit()
+            conn.close()
+            app.logger.info('PostgreSQL database tables created successfully')
+        else:
+            conn = sqlite3.connect(DATABASE)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS golfcourse (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    latitude REAL NOT NULL,
+                    longitude REAL NOT NULL,
+                    address TEXT,
+                    website TEXT,
+                    phone TEXT,
+                    timezone TEXT,
+                    uuid TEXT DEFAULT 'constant'
+                )
+            ''')
+            
+            conn.commit()
+            conn.close()
+            app.logger.info('SQLite database tables created successfully')
         return True
     except Exception as e:
         app.logger.error(f'Failed to initialize database: {str(e)}', exc_info=True)
@@ -91,17 +145,40 @@ def init_db():
 
 def course_to_dict(row):
     """Convert database row to dictionary."""
-    return {
-        'id': row['id'],
-        'name': row['name'],
-        'latitude': float(row['latitude']),
-        'longitude': float(row['longitude']),
-        'address': row['address'],
-        'website': row['website'],
-        'phone': row['phone'],
-        'timezone': row['timezone'],
-        'uuid': row['uuid']
-    }
+    if DB_TYPE == 'postgresql':
+        # PostgreSQL returns tuples, need to map by index
+        # Assuming columns are: id, name, latitude, longitude, address, website, phone, timezone, uuid
+        return {
+            'id': row[0],
+            'name': row[1],
+            'latitude': float(row[2]),
+            'longitude': float(row[3]),
+            'address': row[4],
+            'website': row[5],
+            'phone': row[6],
+            'timezone': row[7],
+            'uuid': row[8]
+        }
+    else:
+        # SQLite with row_factory
+        return {
+            'id': row['id'],
+            'name': row['name'],
+            'latitude': float(row['latitude']),
+            'longitude': float(row['longitude']),
+            'address': row['address'],
+            'website': row['website'],
+            'phone': row['phone'],
+            'timezone': row['timezone'],
+            'uuid': row['uuid']
+        }
+
+def get_row_value(row, column_name, index):
+    """Get value from row - works with both SQLite Row objects and PostgreSQL tuples."""
+    if DB_TYPE == 'postgresql':
+        return row[index]
+    else:
+        return row[column_name]
 
 def calculate_distance(lat1, lon1, lat2, lon2):
     """Calculate the great circle distance between two points on Earth in miles."""
@@ -176,8 +253,8 @@ def search_courses():
                 for course in courses:
                     distance = calculate_distance(
                         lat, lng, 
-                        float(course['latitude']), 
-                        float(course['longitude'])
+                        float(get_row_value(course, 'latitude', 2)), 
+                        float(get_row_value(course, 'longitude', 3))
                     )
                     course_dict = course_to_dict(course)
                     course_dict['distance_miles'] = round(distance, 2)
@@ -209,16 +286,25 @@ def search_courses():
         # Search by city name
         elif city:
             app.logger.info(f'Performing city-based search for: {city}')
-            cursor.execute('''
-                SELECT * FROM golfcourse 
-                WHERE address LIKE ? OR name LIKE ?
-                LIMIT ?
-            ''', (f'%{city}%', f'%{city}%', limit))
+            
+            if DB_TYPE == 'postgresql':
+                cursor.execute('''
+                    SELECT * FROM golfcourse 
+                    WHERE address ILIKE %s OR name ILIKE %s
+                    LIMIT %s
+                ''', (f'%{city}%', f'%{city}%', limit))
+            else:
+                cursor.execute('''
+                    SELECT * FROM golfcourse 
+                    WHERE address LIKE ? OR name LIKE ?
+                    LIMIT ?
+                ''', (f'%{city}%', f'%{city}%', limit))
+            
             results = cursor.fetchall()
             
             app.logger.info(f'City search completed - Found {len(results)} courses matching "{city}"')
             if results:
-                sample_names = [row['name'] for row in results[:3]]
+                sample_names = [get_row_value(row, 'name', 1) for row in results[:3]]
                 app.logger.info(f'Sample results: {sample_names}')
             
             return jsonify({
@@ -232,16 +318,25 @@ def search_courses():
         # Search by zipcode
         elif zipcode:
             app.logger.info(f'Performing zipcode-based search for: {zipcode}')
-            cursor.execute('''
-                SELECT * FROM golfcourse 
-                WHERE address LIKE ?
-                LIMIT ?
-            ''', (f'%{zipcode}%', limit))
+            
+            if DB_TYPE == 'postgresql':
+                cursor.execute('''
+                    SELECT * FROM golfcourse 
+                    WHERE address ILIKE %s
+                    LIMIT %s
+                ''', (f'%{zipcode}%', limit))
+            else:
+                cursor.execute('''
+                    SELECT * FROM golfcourse 
+                    WHERE address LIKE ?
+                    LIMIT ?
+                ''', (f'%{zipcode}%', limit))
+            
             results = cursor.fetchall()
             
             app.logger.info(f'Zipcode search completed - Found {len(results)} courses matching "{zipcode}"')
             if results:
-                sample_names = [row['name'] for row in results[:3]]
+                sample_names = [get_row_value(row, 'name', 1) for row in results[:3]]
                 app.logger.info(f'Sample results: {sample_names}')
             
             return jsonify({
@@ -255,16 +350,25 @@ def search_courses():
         # Search by course name
         elif name:
             app.logger.info(f'Performing name-based search for: {name}')
-            cursor.execute('''
-                SELECT * FROM golfcourse 
-                WHERE name LIKE ?
-                LIMIT ?
-            ''', (f'%{name}%', limit))
+            
+            if DB_TYPE == 'postgresql':
+                cursor.execute('''
+                    SELECT * FROM golfcourse 
+                    WHERE name ILIKE %s
+                    LIMIT %s
+                ''', (f'%{name}%', limit))
+            else:
+                cursor.execute('''
+                    SELECT * FROM golfcourse 
+                    WHERE name LIKE ?
+                    LIMIT ?
+                ''', (f'%{name}%', limit))
+            
             results = cursor.fetchall()
             
             app.logger.info(f'Name search completed - Found {len(results)} courses matching "{name}"')
             if results:
-                sample_names = [row['name'] for row in results[:3]]
+                sample_names = [get_row_value(row, 'name', 1) for row in results[:3]]
                 app.logger.info(f'Sample results: {sample_names}')
             
             return jsonify({
@@ -292,12 +396,21 @@ def search_courses():
 # Initialize database on startup
 if init_db():
     try:
-        conn = sqlite3.connect(DATABASE)
-        cursor = conn.cursor()
-        cursor.execute('SELECT COUNT(*) FROM golfcourse')
-        course_count = cursor.fetchone()[0]
-        conn.close()
-        app.logger.info(f'Database connection successful - Total courses in database: {course_count}')
+        if DB_TYPE == 'postgresql':
+            import psycopg2
+            conn = psycopg2.connect(DATABASE)
+            cursor = conn.cursor()
+            cursor.execute('SELECT COUNT(*) FROM golfcourse')
+            course_count = cursor.fetchone()[0]
+            conn.close()
+            app.logger.info(f'PostgreSQL connection successful - Total courses in database: {course_count}')
+        else:
+            conn = sqlite3.connect(DATABASE)
+            cursor = conn.cursor()
+            cursor.execute('SELECT COUNT(*) FROM golfcourse')
+            course_count = cursor.fetchone()[0]
+            conn.close()
+            app.logger.info(f'SQLite connection successful - Total courses in database: {course_count}')
     except Exception as e:
         app.logger.error(f'Database connection test failed: {str(e)}', exc_info=True)
 
