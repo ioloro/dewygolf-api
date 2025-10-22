@@ -1,6 +1,5 @@
-from flask import Flask, request, jsonify
-from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import func, or_
+from flask import Flask, request, jsonify, g
+import sqlite3
 import math
 import os
 import logging
@@ -44,40 +43,65 @@ def setup_logging():
 setup_logging()
 
 # Database configuration
-database_url = os.environ.get('DATABASE_URL', 'sqlite:///golfcourses.db')
-app.config['SQLALCHEMY_DATABASE_URI'] = database_url
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+DATABASE = os.environ.get('DATABASE_PATH', 'golfcourses.db')
+app.logger.info(f'Configuring database connection: {DATABASE}')
 
-app.logger.info(f'Configuring database connection: {database_url}')
+def get_db():
+    """Get database connection for the current request."""
+    db = getattr(g, '_database', None)
+    if db is None:
+        db = g._database = sqlite3.connect(DATABASE)
+        db.row_factory = sqlite3.Row
+    return db
 
-db = SQLAlchemy(app)
+@app.teardown_appcontext
+def close_connection(exception):
+    """Close database connection at the end of request."""
+    db = getattr(g, '_database', None)
+    if db is not None:
+        db.close()
 
-# Golf Course Model
-class GolfCourse(db.Model):
-    __tablename__ = 'golfcourse'
-    
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.Text, nullable=False)
-    latitude = db.Column(db.Numeric, nullable=False)
-    longitude = db.Column(db.Numeric, nullable=False)
-    address = db.Column(db.Text)
-    website = db.Column(db.Text)
-    phone = db.Column(db.Text)
-    timezone = db.Column(db.Text)
-    uuid = db.Column(db.Text, default='constant')
+def init_db():
+    """Initialize the database with required tables."""
+    try:
+        conn = sqlite3.connect(DATABASE)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS golfcourse (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                latitude REAL NOT NULL,
+                longitude REAL NOT NULL,
+                address TEXT,
+                website TEXT,
+                phone TEXT,
+                timezone TEXT,
+                uuid TEXT DEFAULT 'constant'
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        app.logger.info('Database tables created successfully')
+        return True
+    except Exception as e:
+        app.logger.error(f'Failed to initialize database: {str(e)}', exc_info=True)
+        return False
 
-    def to_dict(self):
-        return {
-            'id': self.id,
-            'name': self.name,
-            'latitude': float(self.latitude),
-            'longitude': float(self.longitude),
-            'address': self.address,
-            'website': self.website,
-            'phone': self.phone,
-            'timezone': self.timezone,
-            'uuid': self.uuid
-        }
+def course_to_dict(row):
+    """Convert database row to dictionary."""
+    return {
+        'id': row['id'],
+        'name': row['name'],
+        'latitude': float(row['latitude']),
+        'longitude': float(row['longitude']),
+        'address': row['address'],
+        'website': row['website'],
+        'phone': row['phone'],
+        'timezone': row['timezone'],
+        'uuid': row['uuid']
+    }
 
 def calculate_distance(lat1, lon1, lat2, lon2):
     """Calculate the great circle distance between two points on Earth in miles."""
@@ -130,7 +154,8 @@ def search_courses():
         
         app.logger.info(f'Search parameters - lat: {lat}, lng: {lng}, city: {city}, zipcode: {zipcode}, name: {name}, limit: {limit}')
         
-        query = GolfCourse.query
+        db = get_db()
+        cursor = db.cursor()
         
         # Search by latitude/longitude (nearest courses)
         if lat and lng:
@@ -142,7 +167,8 @@ def search_courses():
                 
                 # Get all courses and calculate distances
                 app.logger.info('Querying database for all golf courses')
-                courses = query.all()
+                cursor.execute('SELECT * FROM golfcourse')
+                courses = cursor.fetchall()
                 app.logger.info(f'Retrieved {len(courses)} courses from database')
                 
                 courses_with_distance = []
@@ -150,10 +176,10 @@ def search_courses():
                 for course in courses:
                     distance = calculate_distance(
                         lat, lng, 
-                        float(course.latitude), 
-                        float(course.longitude)
+                        float(course['latitude']), 
+                        float(course['longitude'])
                     )
-                    course_dict = course.to_dict()
+                    course_dict = course_to_dict(course)
                     course_dict['distance_miles'] = round(distance, 2)
                     courses_with_distance.append(course_dict)
                 
@@ -183,59 +209,69 @@ def search_courses():
         # Search by city name
         elif city:
             app.logger.info(f'Performing city-based search for: {city}')
-            query = query.filter(
-                or_(
-                    GolfCourse.address.ilike(f'%{city}%'),
-                    GolfCourse.name.ilike(f'%{city}%')
-                )
-            )
-            results = query.limit(limit).all()
+            cursor.execute('''
+                SELECT * FROM golfcourse 
+                WHERE address LIKE ? OR name LIKE ?
+                LIMIT ?
+            ''', (f'%{city}%', f'%{city}%', limit))
+            results = cursor.fetchall()
             
             app.logger.info(f'City search completed - Found {len(results)} courses matching "{city}"')
             if results:
-                app.logger.info(f'Sample results: {[course.name for course in results[:3]]}')
+                sample_names = [row['name'] for row in results[:3]]
+                app.logger.info(f'Sample results: {sample_names}')
             
             return jsonify({
                 'success': True,
                 'search_type': 'city',
                 'search_term': city,
-                'results': [course.to_dict() for course in results],
+                'results': [course_to_dict(row) for row in results],
                 'total_found': len(results)
             })
         
         # Search by zipcode
         elif zipcode:
             app.logger.info(f'Performing zipcode-based search for: {zipcode}')
-            query = query.filter(GolfCourse.address.ilike(f'%{zipcode}%'))
-            results = query.limit(limit).all()
+            cursor.execute('''
+                SELECT * FROM golfcourse 
+                WHERE address LIKE ?
+                LIMIT ?
+            ''', (f'%{zipcode}%', limit))
+            results = cursor.fetchall()
             
             app.logger.info(f'Zipcode search completed - Found {len(results)} courses matching "{zipcode}"')
             if results:
-                app.logger.info(f'Sample results: {[course.name for course in results[:3]]}')
+                sample_names = [row['name'] for row in results[:3]]
+                app.logger.info(f'Sample results: {sample_names}')
             
             return jsonify({
                 'success': True,
                 'search_type': 'zipcode',
                 'search_term': zipcode,
-                'results': [course.to_dict() for course in results],
+                'results': [course_to_dict(row) for row in results],
                 'total_found': len(results)
             })
         
         # Search by course name
         elif name:
             app.logger.info(f'Performing name-based search for: {name}')
-            query = query.filter(GolfCourse.name.ilike(f'%{name}%'))
-            results = query.limit(limit).all()
+            cursor.execute('''
+                SELECT * FROM golfcourse 
+                WHERE name LIKE ?
+                LIMIT ?
+            ''', (f'%{name}%', limit))
+            results = cursor.fetchall()
             
             app.logger.info(f'Name search completed - Found {len(results)} courses matching "{name}"')
             if results:
-                app.logger.info(f'Sample results: {[course.name for course in results[:3]]}')
+                sample_names = [row['name'] for row in results[:3]]
+                app.logger.info(f'Sample results: {sample_names}')
             
             return jsonify({
                 'success': True,
                 'search_type': 'name',
                 'search_term': name,
-                'results': [course.to_dict() for course in results],
+                'results': [course_to_dict(row) for row in results],
                 'total_found': len(results)
             })
         
@@ -253,21 +289,17 @@ def search_courses():
             'error': str(e)
         }), 500
 
-# Create database tables
-try:
-    with app.app_context():
-        app.logger.info('Attempting to create database tables')
-        db.create_all()
-        
-        # Log database connection test
-        try:
-            course_count = GolfCourse.query.count()
-            app.logger.info(f'Database connection successful - Total courses in database: {course_count}')
-        except Exception as e:
-            app.logger.error(f'Database connection test failed: {str(e)}', exc_info=True)
-            
-except Exception as e:
-    app.logger.error(f'Failed to initialize database: {str(e)}', exc_info=True)
+# Initialize database on startup
+if init_db():
+    try:
+        conn = sqlite3.connect(DATABASE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM golfcourse')
+        course_count = cursor.fetchone()[0]
+        conn.close()
+        app.logger.info(f'Database connection successful - Total courses in database: {course_count}')
+    except Exception as e:
+        app.logger.error(f'Database connection test failed: {str(e)}', exc_info=True)
 
 if __name__ == '__main__':
     app.logger.info('Starting Flask development server')
