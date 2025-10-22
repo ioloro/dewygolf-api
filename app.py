@@ -317,5 +317,5 @@ if init_db():
 
 if __name__ == '__main__':
     app.logger.info('Starting Flask development server')
-    app.logger.info('DATABASE_URL: {os.environ.get('DATABASE_URL')})
+    app.logger.info('DATABASE_URL: {os.environ.get('DATABASE_URL')}')
     app.run(debug=True)
