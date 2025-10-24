@@ -275,9 +275,8 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     return R * c
 
 @app.route("/")
-def hello_world():
-    app.logger.info('Root endpoint accessed')
-    return "Golf Course Search API - Use /search endpoint"
+def root_route():
+    return redirect("https://dewygolf.com", code=302)
 
 @app.route("/search", methods=['GET', 'POST'])
 def search_courses():
