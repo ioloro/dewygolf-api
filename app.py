@@ -456,6 +456,38 @@ def get_users_db():
                 app.logger.info('Users PostgreSQL connection established successfully')
                 app.logger.debug(f'Connection stored in g._users_database: {type(users_db)}')
                 
+                # Verify users table exists
+                app.logger.debug('Checking if users table exists in PostgreSQL')
+                try:
+                    table_check = users_db.run(
+                        """SELECT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_schema = 'public' 
+                            AND table_name = 'users'
+                        )"""
+                    )
+                    table_exists = table_check[0][0] if table_check else False
+                    app.logger.debug(f'Users table exists: {table_exists}')
+                    
+                    if not table_exists:
+                        app.logger.warning('Users table does not exist! Listing all available tables...')
+                        all_tables = users_db.run(
+                            """SELECT table_name 
+                               FROM information_schema.tables 
+                               WHERE table_schema = 'public' 
+                               ORDER BY table_name"""
+                        )
+                        table_names = [row[0] for row in all_tables] if all_tables else []
+                        app.logger.warning(f'Available tables in database: {table_names}')
+                        app.logger.warning(f'Total tables found: {len(table_names)}')
+                        
+                        if not table_names:
+                            app.logger.error('No tables found in database! Database may be empty.')
+                        else:
+                            app.logger.info(f'Tables present: {", ".join(table_names)}')
+                except Exception as table_check_err:
+                    app.logger.error(f'Error checking for users table: {str(table_check_err)}', exc_info=True)
+                
             except ImportError as import_err:
                 app.logger.error(f'pg8000 import failed: {str(import_err)}')
                 app.logger.error('pg8000 not installed. Install with: pip install pg8000')
@@ -479,6 +511,33 @@ def get_users_db():
                 
                 app.logger.info('Users SQLite connection established')
                 app.logger.debug(f'SQLite database file: {USERS_DATABASE}')
+                
+                # Verify users table exists
+                app.logger.debug('Checking if users table exists in SQLite')
+                try:
+                    cursor = users_db.cursor()
+                    cursor.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='users'"
+                    )
+                    table_exists = cursor.fetchone() is not None
+                    app.logger.debug(f'Users table exists: {table_exists}')
+                    
+                    if not table_exists:
+                        app.logger.warning('Users table does not exist! Listing all available tables...')
+                        cursor.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                        )
+                        all_tables = cursor.fetchall()
+                        table_names = [row[0] for row in all_tables] if all_tables else []
+                        app.logger.warning(f'Available tables in database: {table_names}')
+                        app.logger.warning(f'Total tables found: {len(table_names)}')
+                        
+                        if not table_names:
+                            app.logger.error('No tables found in database! Database may be empty.')
+                        else:
+                            app.logger.info(f'Tables present: {", ".join(table_names)}')
+                except Exception as table_check_err:
+                    app.logger.error(f'Error checking for users table: {str(table_check_err)}', exc_info=True)
                 
             except sqlite3.Error as sqlite_err:
                 app.logger.error(f'SQLite connection error: {str(sqlite_err)}', exc_info=True)
