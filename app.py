@@ -38,7 +38,7 @@ limiter = Limiter(
 # Initialize CORS
 cors = CORS(app, origins=app.config['CORS_ORIGINS'])
 
-DATABASE = DATABASE_URL
+DATABASE = os.environ.get('DATABASE_URL', '')
 
 # Security Headers
 @app.after_request
