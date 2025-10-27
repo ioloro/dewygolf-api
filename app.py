@@ -1,957 +1,676 @@
-from flask import Flask, request, jsonify, g, redirect, abort
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-from flask_cors import CORS
-import sqlite3
-import math
+#!/usr/bin/env python3
+"""
+Golf Course Search API
+A production-ready Flask application with SSL, database health checks, 
+and API key authentication for searching golf courses.
+"""
+
 import os
 import logging
-from logging.handlers import RotatingFileHandler
 import sys
-from urllib.parse import urlparse, parse_qs
-import re
-import hashlib
-import secrets
-from datetime import datetime, timedelta
+from datetime import datetime
+from typing import Dict, Any, Optional, Tuple
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from psycopg2 import pool
+from flask import Flask, request, jsonify, Response
 from functools import wraps
-from dotenv import load_dotenv
-import hmac
-import base64
+import traceback
+import uuid as uuid_lib
 
-# Load environment variables
-load_dotenv()
+# ============================================================================
+# LOGGING CONFIGURATION - OVER THE TOP DIAGNOSTICS
+# ============================================================================
 
-app = Flask(__name__)
+# Create logs directory if it doesn't exist
+os.makedirs('logs', exist_ok=True)
 
-# Security Configuration
-app.config['RATE_LIMIT_ENABLED'] = os.environ.get('RATE_LIMIT_ENABLED', 'true').lower() == 'true'
-app.config['CORS_ORIGINS'] = os.environ.get('CORS_ORIGINS', '').split(',') if os.environ.get('CORS_ORIGINS') else ['*']
-app.config['DB_PASSWORD'] = os.environ.get('DB_PASSWORD', '')
-
-# Initialize Rate Limiter
-limiter = Limiter(
-    app=app,
-    key_func=get_remote_address,
-    default_limits=["1000 per hour", "100 per minute"] if app.config['RATE_LIMIT_ENABLED'] else []
+# Configure root logger
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s | %(levelname)-8s | %(name)-20s | %(funcName)-25s | Line:%(lineno)-4d | %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('logs/app.log', mode='a'),
+        logging.FileHandler('logs/app_debug.log', mode='a')
+    ]
 )
 
-# Initialize CORS
-cors = CORS(app, origins=app.config['CORS_ORIGINS'])
+# Create specialized loggers
+logger = logging.getLogger('GolfCourseAPI')
+db_logger = logging.getLogger('Database')
+auth_logger = logging.getLogger('Authentication')
+api_logger = logging.getLogger('APIRequests')
+error_logger = logging.getLogger('Errors')
 
-DATABASE = os.environ.get('DATABASE_URL', '')
+# Set levels for specialized loggers
+logger.setLevel(logging.DEBUG)
+db_logger.setLevel(logging.DEBUG)
+auth_logger.setLevel(logging.INFO)
+api_logger.setLevel(logging.INFO)
+error_logger.setLevel(logging.ERROR)
 
-# Security Headers
-@app.after_request
-def add_security_headers(response):
-    """Add security headers to all responses."""
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['X-XSS-Protection'] = '1; mode=block'
-    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
-    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
-    response.headers['Content-Security-Policy'] = "default-src 'self'"
-    response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
-    return response
+logger.info("=" * 80)
+logger.info("Golf Course API Application Starting")
+logger.info("=" * 80)
 
-# API Key Authentication
+# ============================================================================
+# FLASK APPLICATION SETUP
+# ============================================================================
+
+app = Flask(__name__)
+app.config['JSON_SORT_KEYS'] = False
+
+# Database configuration from environment variables
+DB_CONFIG = {
+    'host': os.getenv('DB_HOST', 'localhost'),
+    'port': os.getenv('DB_PORT', '5432'),
+    'database': os.getenv('DB_NAME', 'golf_db'),
+    'user': os.getenv('DB_USER', 'postgres'),
+    'password': os.getenv('DB_PASSWORD', ''),
+}
+
+logger.info(f"Database configuration loaded: host={DB_CONFIG['host']}, "
+            f"port={DB_CONFIG['port']}, database={DB_CONFIG['database']}, "
+            f"user={DB_CONFIG['user']}")
+
+# Connection pool configuration
+MIN_CONNECTIONS = int(os.getenv('DB_POOL_MIN', '2'))
+MAX_CONNECTIONS = int(os.getenv('DB_POOL_MAX', '10'))
+
+db_logger.info(f"Initializing connection pool: min={MIN_CONNECTIONS}, max={MAX_CONNECTIONS}")
+
+# Global connection pool
+connection_pool = None
+
+# ============================================================================
+# DATABASE CONNECTION POOL MANAGEMENT
+# ============================================================================
+
+def initialize_connection_pool():
+    """Initialize the database connection pool."""
+    global connection_pool
+    try:
+        db_logger.info("Creating database connection pool...")
+        connection_pool = psycopg2.pool.ThreadedConnectionPool(
+            MIN_CONNECTIONS,
+            MAX_CONNECTIONS,
+            **DB_CONFIG
+        )
+        db_logger.info("✓ Database connection pool created successfully")
+        
+        # Test the connection
+        test_conn = connection_pool.getconn()
+        test_conn.close()
+        connection_pool.putconn(test_conn)
+        db_logger.info("✓ Database connection test successful")
+        
+        return True
+    except Exception as e:
+        error_logger.critical(f"✗ Failed to initialize connection pool: {str(e)}")
+        error_logger.critical(traceback.format_exc())
+        return False
+
+
+def get_db_connection():
+    """Get a connection from the pool."""
+    try:
+        if connection_pool is None:
+            db_logger.error("Connection pool is not initialized")
+            raise Exception("Database connection pool not initialized")
+        
+        conn = connection_pool.getconn()
+        db_logger.debug(f"Connection acquired from pool. Pool status: {connection_pool._used} used")
+        return conn
+    except Exception as e:
+        error_logger.error(f"Failed to get connection from pool: {str(e)}")
+        raise
+
+
+def return_db_connection(conn):
+    """Return a connection to the pool."""
+    try:
+        if conn and connection_pool:
+            connection_pool.putconn(conn)
+            db_logger.debug(f"Connection returned to pool. Pool status: {connection_pool._used} used")
+    except Exception as e:
+        error_logger.error(f"Failed to return connection to pool: {str(e)}")
+
+
+# ============================================================================
+# DATABASE OPERATIONS
+# ============================================================================
+
+def check_database_health() -> Tuple[bool, Dict[str, Any]]:
+    """
+    Check database connection and verify golfcourse table exists and is accessible.
+    
+    Returns:
+        Tuple of (is_healthy: bool, status_dict: Dict)
+    """
+    db_logger.info("Starting database health check...")
+    health_status = {
+        'database_connected': False,
+        'golfcourse_table_exists': False,
+        'golfcourse_table_accessible': False,
+        'row_count': 0,
+        'error': None
+    }
+    
+    conn = None
+    try:
+        # Test connection
+        db_logger.debug("Attempting database connection...")
+        conn = get_db_connection()
+        health_status['database_connected'] = True
+        db_logger.info("✓ Database connection successful")
+        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Check if golfcourse table exists
+        db_logger.debug("Checking if golfcourse table exists...")
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'golfcourse'
+            );
+        """)
+        table_exists = cursor.fetchone()['exists']
+        health_status['golfcourse_table_exists'] = table_exists
+        
+        if table_exists:
+            db_logger.info("✓ golfcourse table exists")
+            
+            # Try to query the table
+            db_logger.debug("Attempting to query golfcourse table...")
+            cursor.execute("SELECT COUNT(*) as count FROM golfcourse;")
+            result = cursor.fetchone()
+            health_status['row_count'] = result['count']
+            health_status['golfcourse_table_accessible'] = True
+            db_logger.info(f"✓ golfcourse table accessible with {result['count']} rows")
+        else:
+            db_logger.warning("✗ golfcourse table does not exist")
+        
+        cursor.close()
+        
+        is_healthy = (health_status['database_connected'] and 
+                     health_status['golfcourse_table_exists'] and 
+                     health_status['golfcourse_table_accessible'])
+        
+        db_logger.info(f"Health check complete. Status: {'HEALTHY' if is_healthy else 'UNHEALTHY'}")
+        return is_healthy, health_status
+        
+    except Exception as e:
+        error_logger.error(f"✗ Database health check failed: {str(e)}")
+        error_logger.error(traceback.format_exc())
+        health_status['error'] = str(e)
+        return False, health_status
+        
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+
+def verify_api_key(api_key: str) -> Optional[Dict[str, Any]]:
+    """
+    Verify API key exists in users table and check if user is active and not banned.
+    If API key doesn't exist, create a new user entry.
+    
+    Args:
+        api_key: The API key to verify
+        
+    Returns:
+        User dict if valid, None if invalid/banned/inactive
+    """
+    auth_logger.info(f"Verifying API key: {api_key[:8]}...")
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Check if user exists
+        auth_logger.debug(f"Querying users table for API key: {api_key[:8]}...")
+        cursor.execute("""
+            SELECT id, uuid, "displayName", "isActive", banned, 
+                   "lastActivityDate", email, role
+            FROM users 
+            WHERE uuid = %s;
+        """, (api_key,))
+        
+        user = cursor.fetchone()
+        
+        if user:
+            auth_logger.info(f"✓ User found: id={user['id']}, displayName={user['displayName']}")
+            
+            # Check if user is banned
+            if user['banned']:
+                auth_logger.warning(f"✗ User {user['id']} is BANNED. Access denied.")
+                cursor.close()
+                return None
+            
+            # Check if user is active
+            if not user['isActive']:
+                auth_logger.warning(f"✗ User {user['id']} is INACTIVE. Access denied.")
+                cursor.close()
+                return None
+            
+            # Update last activity date
+            auth_logger.debug(f"Updating lastActivityDate for user {user['id']}...")
+            current_time = datetime.utcnow().isoformat()
+            cursor.execute("""
+                UPDATE users 
+                SET "lastActivityDate" = %s 
+                WHERE id = %s;
+            """, (current_time, user['id']))
+            conn.commit()
+            auth_logger.info(f"✓ User {user['id']} validated and activity updated")
+            
+            cursor.close()
+            return dict(user)
+        else:
+            # User doesn't exist, create new user
+            auth_logger.info(f"User not found. Creating new user with API key: {api_key[:8]}...")
+            
+            current_time = datetime.utcnow().isoformat()
+            cursor.execute("""
+                INSERT INTO users (
+                    uuid, "displayName", "firstConnectionDate", 
+                    "isActive", "lastActivityDate"
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id, uuid, "displayName", "isActive", banned;
+            """, (api_key, f'User_{api_key[:8]}', current_time, True, current_time))
+            
+            new_user = cursor.fetchone()
+            conn.commit()
+            
+            auth_logger.info(f"✓ NEW USER CREATED: id={new_user['id']}, "
+                           f"displayName={new_user['displayName']}")
+            
+            cursor.close()
+            return dict(new_user)
+            
+    except Exception as e:
+        error_logger.error(f"✗ API key verification failed: {str(e)}")
+        error_logger.error(traceback.format_exc())
+        if conn:
+            conn.rollback()
+        return None
+        
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+
+def search_golf_courses(params: Dict[str, str]) -> Tuple[list, int]:
+    """
+    Search golf courses based on various parameters.
+    
+    Args:
+        params: Dictionary of search parameters
+        
+    Returns:
+        Tuple of (results: list, total_count: int)
+    """
+    api_logger.info(f"Searching golf courses with parameters: {params}")
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Build dynamic query
+        where_clauses = []
+        query_params = []
+        param_counter = 1
+        
+        # Name search (case-insensitive partial match)
+        if 'name' in params and params['name']:
+            where_clauses.append(f"name ILIKE ${param_counter}")
+            query_params.append(f"%{params['name']}%")
+            param_counter += 1
+            api_logger.debug(f"Added name filter: ILIKE '%{params['name']}%'")
+        
+        # Address search (case-insensitive partial match)
+        if 'address' in params and params['address']:
+            where_clauses.append(f"address ILIKE ${param_counter}")
+            query_params.append(f"%{params['address']}%")
+            param_counter += 1
+            api_logger.debug(f"Added address filter: ILIKE '%{params['address']}%'")
+        
+        # Phone search (exact match)
+        if 'phone' in params and params['phone']:
+            where_clauses.append(f"phone = ${param_counter}")
+            query_params.append(params['phone'])
+            param_counter += 1
+            api_logger.debug(f"Added phone filter: = '{params['phone']}'")
+        
+        # Website search (case-insensitive partial match)
+        if 'website' in params and params['website']:
+            where_clauses.append(f"website ILIKE ${param_counter}")
+            query_params.append(f"%{params['website']}%")
+            param_counter += 1
+            api_logger.debug(f"Added website filter: ILIKE '%{params['website']}%'")
+        
+        # Timezone search (exact match)
+        if 'timezone' in params and params['timezone']:
+            where_clauses.append(f"timezone = ${param_counter}")
+            query_params.append(params['timezone'])
+            param_counter += 1
+            api_logger.debug(f"Added timezone filter: = '{params['timezone']}'")
+        
+        # UUID search (exact match)
+        if 'uuid' in params and params['uuid']:
+            where_clauses.append(f"uuid = ${param_counter}")
+            query_params.append(params['uuid'])
+            param_counter += 1
+            api_logger.debug(f"Added uuid filter: = '{params['uuid']}'")
+        
+        # Latitude/Longitude radius search
+        if all(k in params for k in ['latitude', 'longitude', 'radius']):
+            try:
+                lat = float(params['latitude'])
+                lon = float(params['longitude'])
+                radius_km = float(params['radius'])
+                
+                # Using Haversine formula for distance calculation
+                where_clauses.append(f"""
+                    (6371 * acos(
+                        cos(radians(${param_counter})) * cos(radians(latitude)) * 
+                        cos(radians(longitude) - radians(${param_counter + 1})) + 
+                        sin(radians(${param_counter})) * sin(radians(latitude))
+                    )) <= ${param_counter + 2}
+                """)
+                query_params.extend([lat, lon, radius_km])
+                param_counter += 3
+                api_logger.debug(f"Added radius search: lat={lat}, lon={lon}, radius={radius_km}km")
+            except ValueError as e:
+                api_logger.warning(f"Invalid lat/lon/radius values: {e}")
+        
+        # Build final query
+        base_query = "SELECT * FROM golfcourse"
+        if where_clauses:
+            # Convert $1, $2 format to %s for psycopg2
+            where_sql = " AND ".join(where_clauses)
+            where_sql = where_sql.replace('$', '%s_').replace('%s_', '%s', 100)
+            for i in range(len(query_params), 0, -1):
+                where_sql = where_sql.replace(f'%s', '%s', 1)
+            query = f"{base_query} WHERE {where_sql}"
+        else:
+            query = base_query
+        
+        # Add pagination
+        limit = min(int(params.get('limit', 100)), 1000)  # Max 1000 results
+        offset = int(params.get('offset', 0))
+        query += f" LIMIT {limit} OFFSET {offset}"
+        
+        api_logger.debug(f"Executing query: {query}")
+        api_logger.debug(f"Query parameters: {query_params}")
+        
+        cursor.execute(query, query_params)
+        results = cursor.fetchall()
+        
+        # Get total count
+        count_query = "SELECT COUNT(*) as total FROM golfcourse"
+        if where_clauses:
+            where_sql = " AND ".join(where_clauses)
+            where_sql = where_sql.replace('$', '%s_').replace('%s_', '%s', 100)
+            for i in range(len(query_params), 0, -1):
+                where_sql = where_sql.replace(f'%s', '%s', 1)
+            count_query += f" WHERE {where_sql}"
+        
+        cursor.execute(count_query, query_params)
+        total_count = cursor.fetchone()['total']
+        
+        cursor.close()
+        
+        api_logger.info(f"✓ Search completed: {len(results)} results returned, "
+                       f"{total_count} total matches")
+        
+        return [dict(row) for row in results], total_count
+        
+    except Exception as e:
+        error_logger.error(f"✗ Golf course search failed: {str(e)}")
+        error_logger.error(traceback.format_exc())
+        raise
+        
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+
+# ============================================================================
+# DECORATORS
+# ============================================================================
+
 def require_api_key(f):
-    """Decorator to require API key authentication."""
+    """Decorator to require and validate API key for protected endpoints."""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        app.logger.debug(f'require_api_key decorator called for endpoint: {request.endpoint}')
-        app.logger.debug(f'Request method: {request.method}, Path: {request.path}')
-        app.logger.debug(f'Request from: {request.remote_addr}, User-Agent: {request.headers.get("User-Agent", "N/A")}')
+        request_id = str(uuid_lib.uuid4())[:8]
+        api_logger.info(f"[{request_id}] Request to {request.path} from {request.remote_addr}")
         
-        # Extract API key from headers or query params
-        api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
-        
-        app.logger.debug(f'API key source: {"header" if request.headers.get("X-API-Key") else "query_param" if request.args.get("api_key") else "none"}')
+        # Get API key from header
+        api_key = request.headers.get('X-API-Key') or request.headers.get('Authorization')
         
         if not api_key:
-            app.logger.warning(f'API request without key from {request.remote_addr} to {request.endpoint}')
-            log_security_event('API_KEY_MISSING', f'No API key provided from {request.remote_addr}')
-            return jsonify({'error': 'API key required'}), 401
-
-        app.logger.debug(f'API key received: {api_key}')
+            auth_logger.warning(f"[{request_id}] ✗ Missing API key in request")
+            return jsonify({
+                'error': 'Missing API key',
+                'message': 'Please provide API key in X-API-Key or Authorization header'
+            }), 401
         
-        # Check if users database is available
-        app.logger.debug(f'Checking users database availability: {users_db_available}')
-        if not users_db_available:
-            app.logger.warning(f'Users database unavailable - falling back to config check for key {masked_key}')
-            app.logger.debug(f'Number of API keys in config: {len(app.config.get("API_KEYS", []))}')
-            
-            if api_key not in app.config.get('API_KEYS', []):
-                app.logger.warning(f'Invalid API key attempt from {request.remote_addr} (key: {masked_key})')
-                log_security_event('INVALID_API_KEY_CONFIG', f'Invalid key {masked_key} from {request.remote_addr}')
-                return jsonify({'error': 'Invalid API key'}), 401
-            
-            app.logger.info(f'Valid API key from config for {request.remote_addr} (key: {masked_key})')
-            return f(*args, **kwargs)
+        # Remove 'Bearer ' prefix if present
+        if api_key.startswith('Bearer '):
+            api_key = api_key[7:]
         
-        try:
-            app.logger.debug('Attempting to get users database connection')
-            users_db = get_users_db()
-            app.logger.debug(f'Users database connection obtained: {type(users_db)}')
-            
-            # Check if API key exists in database
-            app.logger.debug(f'Querying database for API key {masked_key}')
-            
-            app.logger.debug('Executing PostgreSQL query for API key lookup')
-            try:
-                result = users_db.run(
-                    'SELECT api_key, is_banned FROM users WHERE api_key = :api_key',
-                    api_key=api_key
-                    )
-                user = result[0] if result else None
-                app.logger.debug(f'PostgreSQL query result: {"user found" if user else "no user found"}')
-            except Exception as pg_err:
-                app.logger.error(f'PostgreSQL query error: {str(pg_err)}', exc_info=True)
-                raise
-            
-            if user:
-                app.logger.debug(f'User record found for key {masked_key}')
-                
-                # Check if user is banned
-                is_banned = user[1] if isinstance(user, (tuple, list)) else user['is_banned']
-                app.logger.debug(f'User banned status: {is_banned}')
-                
-                if is_banned:
-                    app.logger.warning(f'Banned API key attempt from {request.remote_addr} (key: {masked_key})')
-                    log_security_event('BANNED_API_KEY_ATTEMPT', f'Banned key {masked_key} used from {request.remote_addr}')
-                    return jsonify({'error': 'API key has been banned'}), 403
-                
-                # Valid API key, not banned - allow access
-                app.logger.info(f'Valid API key access from {request.remote_addr} to {request.endpoint} (key: {masked_key})')
-                log_security_event('API_KEY_SUCCESS', f'Valid key {masked_key} from {request.remote_addr}')
-                return f(*args, **kwargs)
-            else:
-                # API key doesn't exist - add it to the database
-                app.logger.info(f'New API key detected from {request.remote_addr} (key: {masked_key}), adding to database')
-                
-                try:
-                    current_time = datetime.utcnow()
-                    app.logger.debug(f'Current UTC time for new user: {current_time.isoformat()}')
-                    
-                    app.logger.debug('Inserting new user into PostgreSQL')
-                    users_db.run(
-                        '''INSERT INTO users (api_key, is_banned, created_at, last_used_at) 
-                        VALUES (:api_key, :is_banned, :created_at, :last_used_at)''',
-                        api_key=api_key,
-                        is_banned=False,
-                        created_at=current_time,
-                        last_used_at=current_time
-                    )
-                    app.logger.debug('PostgreSQL insert completed')
-
-                    app.logger.info(f'Successfully added new API key to database (key: {masked_key})')
-                    log_security_event('NEW_API_KEY_ADDED', f'New key {masked_key} added from {request.remote_addr}')
-                    return f(*args, **kwargs)
-                    
-                except Exception as insert_err:
-                    app.logger.error(f'Error inserting new API key into database: {str(insert_err)}', exc_info=True)
-                    app.logger.error(f'Insert error type: {type(insert_err).__name__}')
-                    log_security_event('API_KEY_INSERT_ERROR', f'Failed to add key {masked_key}: {str(insert_err)}')
-                    return jsonify({'error': 'Failed to register API key'}), 500
-                
-        except Exception as e:
-            app.logger.error(f'Error checking API key in database: {str(e)}', exc_info=True)
-            app.logger.error(f'Exception type: {type(e).__name__}')
-            app.logger.error(f'Endpoint: {request.endpoint}, Remote addr: {request.remote_addr}')
-            log_security_event('API_KEY_CHECK_ERROR', f'Database error for {masked_key}: {str(e)}')
-            return jsonify({'error': 'Internal server error during authentication'}), 500
+        auth_logger.debug(f"[{request_id}] Validating API key: {api_key[:8]}...")
+        
+        # Verify API key
+        user = verify_api_key(api_key)
+        
+        if not user:
+            auth_logger.warning(f"[{request_id}] ✗ Invalid, inactive, or banned API key")
+            return jsonify({
+                'error': 'Invalid API key',
+                'message': 'API key is invalid, inactive, or banned'
+            }), 403
+        
+        auth_logger.info(f"[{request_id}] ✓ API key validated for user: {user['id']}")
+        
+        # Add user info to request context
+        request.user = user
+        request.request_id = request_id
+        
+        return f(*args, **kwargs)
     
     return decorated_function
 
-# Input Validation
-def validate_coordinates(lat, lng):
-    """Validate latitude and longitude values."""
-    try:
-        lat = float(lat)
-        lng = float(lng)
-        
-        if not (-90 <= lat <= 90):
-            raise ValueError('Latitude must be between -90 and 90')
-        if not (-180 <= lng <= 180):
-            raise ValueError('Longitude must be between -180 and 180')
-        
-        return lat, lng
-    except (ValueError, TypeError) as e:
-        raise ValueError(f'Invalid coordinates: {str(e)}')
 
-def sanitize_input(text):
-    """Sanitize user input to prevent injection attacks."""
-    if not isinstance(text, str):
-        return text
+# ============================================================================
+# ROUTES
+# ============================================================================
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint that verifies database and golfcourse table status."""
+    request_id = str(uuid_lib.uuid4())[:8]
+    api_logger.info(f"[{request_id}] Health check requested from {request.remote_addr}")
     
-    # Remove potentially dangerous characters
-    text = re.sub(r'[<>"\'&]', '', text)
-    # Limit length
-    text = text[:100]
-    return text.strip()
-
-def validate_search_params(data):
-    """Validate and sanitize search parameters."""
-    validated = {}
+    is_healthy, status = check_database_health()
     
-    # Validate limit
-    limit = data.get('limit', 10)
-    try:
-        limit = int(limit)
-        if limit < 1 or limit > 100:
-            limit = 10
-    except (ValueError, TypeError):
-        limit = 10
-    validated['limit'] = limit
+    response_data = {
+        'status': 'healthy' if is_healthy else 'unhealthy',
+        'timestamp': datetime.utcnow().isoformat(),
+        'checks': status
+    }
     
-    # Validate and sanitize text inputs
-    for field in ['city', 'zipcode', 'name']:
-        if field in data:
-            validated[field] = sanitize_input(data[field])
+    status_code = 200 if is_healthy else 503
     
-    # Validate coordinates
-    if 'lat' in data and 'lng' in data:
-        try:
-            validated['lat'], validated['lng'] = validate_coordinates(data['lat'], data['lng'])
-        except ValueError as e:
-            raise ValueError(str(e))
+    api_logger.info(f"[{request_id}] Health check complete: "
+                   f"{'HEALTHY' if is_healthy else 'UNHEALTHY'} (HTTP {status_code})")
     
-    return validated
+    return jsonify(response_data), status_code
 
-# Enhanced Logging
-def log_security_event(event_type, details):
-    """Log security-related events."""
-    app.logger.warning(f'SECURITY_EVENT: {event_type} - {details} - IP: {request.remote_addr} - User-Agent: {request.headers.get("User-Agent", "Unknown")}')
 
-# Configure logging
-def setup_logging():
-    """Configure application logging with both file and console handlers."""
-    # Create logs directory if it doesn't exist
-    if not os.path.exists('logs'):
-        os.mkdir('logs')
-    
-    # Set up file handler with rotation
-    file_handler = RotatingFileHandler(
-        'logs/golfcourse_api.log',
-        maxBytes=10240000,  # 10MB
-        backupCount=10
-    )
-    file_handler.setFormatter(logging.Formatter(
-        '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
-    ))
-    file_handler.setLevel(logging.INFO)
-    
-    # Set up console handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(logging.Formatter(
-        '%(asctime)s %(levelname)s: %(message)s'
-    ))
-    console_handler.setLevel(logging.INFO)
-    
-    # Configure app logger
-    app.logger.addHandler(file_handler)
-    app.logger.addHandler(console_handler)
-    app.logger.setLevel(logging.INFO)
-    
-    app.logger.info('Golf Course API startup')
-
-setup_logging()
-
-def get_db():
-    """Get golf courses database connection for the current request."""
-    db = getattr(g, '_database', None)
-    if db is None:
-        try:
-            import pg8000.native
-            
-            # Parse the PostgreSQL URL
-            parsed = urlparse(DATABASE)
-            
-            # Extract connection parameters
-            username = parsed.username
-            password = parsed.password
-            host = parsed.hostname
-            port = parsed.port or 5432
-            database = parsed.path.lstrip('/')
-            
-            # Parse query parameters for SSL settings
-            query_params = parse_qs(parsed.query)
-            ssl_mode = query_params.get('sslmode', ['prefer'])[0]
-            
-            app.logger.info(f'Connecting to PostgreSQL: host={host}, port={port}, database={database}, user={username}, sslmode={ssl_mode}')
-            
-            # Create connection with SSL if required
-            if ssl_mode == 'require':
-                db = g._database = pg8000.native.Connection(
-                    user=username,
-                    password=password,
-                    host=host,
-                    port=port,
-                    database=database,
-                    ssl_context=True
-                )
-            else:
-                db = g._database = pg8000.native.Connection(
-                    user=username,
-                    password=password,
-                    host=host,
-                    port=port,
-                    database=database
-                )
-            
-            app.logger.info('PostgreSQL connection established successfully')
-            
-        except ImportError:
-            app.logger.error('pg8000 not installed. Install with: pip install pg8000')
-            raise
-        except Exception as e:
-            app.logger.error(f'Failed to connect to PostgreSQL: {str(e)}', exc_info=True)
-            raise
-
-    return db
-
-def get_users_db():
-    """Get users database connection for the current request."""
-    app.logger.debug('get_users_db() called - checking for existing connection')
-    app.logger.debug('get_users_db() called - attempting to get {getattr(g}')
-
-    users_db = getattr(g, '_users_database', None)
-    
-    if users_db is None:
-        app.logger.info('No existing users database connection found in request context - creating new connection')
-        
-        app.logger.info('Initiating PostgreSQL connection for users database')
-            
-        try:
-            app.logger.debug('Attempting to import pg8000.native')
-            import pg8000.native
-            app.logger.debug('pg8000.native imported successfully')
-            
-            # Parse the PostgreSQL URL
-            app.logger.debug(f'Parsing PostgreSQL URL: {DATABASE[:20]}...[REDACTED]')
-            parsed = urlparse(DATABASE)
-            
-            # Extract connection parameters
-            username = parsed.username
-            password = parsed.password
-            host = parsed.hostname
-            port = parsed.port or 5432
-            database = parsed.path.lstrip('/')
-            
-            app.logger.debug(f'Extracted connection parameters: username={username}, host={host}, port={port}, database={database}')
-            
-            # Parse query parameters for SSL settings
-            query_params = parse_qs(parsed.query)
-            ssl_mode = query_params.get('sslmode', ['prefer'])[0]
-            
-            app.logger.debug(f'Parsed query parameters: {list(query_params.keys())}')
-            app.logger.info(f'Connecting to PostgreSQL database "{database}": host={host}, port={port}, user={username}, sslmode={ssl_mode}')
-            
-            # Create connection with SSL if required
-            if ssl_mode == 'require':
-                app.logger.debug('SSL mode is "require" - creating connection with SSL context')
-                try:
-                    users_db = g._users_database = pg8000.native.Connection(
-                        user=username,
-                        password=password,
-                        host=host,
-                        port=port,
-                        database=database,
-                        ssl_context=True
-                    )
-                    app.logger.debug('PostgreSQL connection object created with SSL')
-                except Exception as ssl_error:
-                    app.logger.error(f'Failed to create SSL connection: {str(ssl_error)}', exc_info=True)
-                    raise
-            else:
-                app.logger.debug(f'SSL mode is "{ssl_mode}" - creating connection without explicit SSL context')
-                try:
-                    users_db = g._users_database = pg8000.native.Connection(
-                        user=username,
-                        password=password,
-                        host=host,
-                        port=port,
-                        database=database
-                    )
-                    app.logger.debug('PostgreSQL connection object created without SSL')
-                except Exception as conn_error:
-                    app.logger.error(f'Failed to create connection: {str(conn_error)}', exc_info=True)
-                    raise
-            
-            app.logger.info(f'PostgreSQL connection to database "{database}" established successfully')
-            app.logger.debug(f'Connection stored in g._users_database: {type(users_db)}')
-            
-            # Verify required tables exist - THIS IS CRITICAL
-            app.logger.debug(f'Verifying required tables exist in database "{database}"')
-            try:
-                # Get all tables in the database
-                all_tables_result = users_db.run(
-                    """SELECT table_name 
-                       FROM information_schema.tables 
-                       WHERE table_schema = 'public' 
-                       ORDER BY table_name"""
-                )
-                table_names = [row[0] for row in all_tables_result] if all_tables_result else []
-                app.logger.info(f'Tables found in database "{database}": {table_names}')
-                app.logger.debug(f'Total tables found: {len(table_names)}')
-                
-                # Check for required tables
-                required_tables = ['users', 'golfCourses']
-                missing_tables = [table for table in required_tables if table not in table_names]
-                
-                if missing_tables:
-                    app.logger.error(f'CRITICAL ERROR: Required tables missing from database "{database}": {missing_tables}')
-                    app.logger.error(f'Expected tables: {required_tables}')
-                    app.logger.error(f'Found tables: {table_names}')
-                    
-                    if not table_names:
-                        app.logger.error('Database is completely empty - no tables found!')
-                    
-                    # FAIL HARD - raise exception
-                    raise RuntimeError(
-                        f'Required tables missing from database "{database}": {missing_tables}. '
-                        f'Expected: {required_tables}, Found: {table_names}. '
-                        f'Please run database migrations or create the missing tables.'
-                    )
-                
-                app.logger.info(f'All required tables verified in database "{database}": {required_tables}')
-                
-            except RuntimeError:
-                # Re-raise our custom error
-                raise
-            except Exception as table_check_err:
-                app.logger.error(f'Error checking for required tables: {str(table_check_err)}', exc_info=True)
-                raise RuntimeError(f'Failed to verify required tables: {str(table_check_err)}')
-            
-        except ImportError as import_err:
-            app.logger.error(f'pg8000 import failed: {str(import_err)}')
-            app.logger.error('pg8000 not installed. Install with: pip install pg8000')
-            app.logger.debug('Import error details:', exc_info=True)
-            raise
-        except Exception as e:
-            app.logger.error(f'Failed to connect to PostgreSQL: {str(e)}', exc_info=True)
-            app.logger.error(f'Exception type: {type(e).__name__}')
-            if 'host' in locals():
-                app.logger.debug(f'Connection parameters that failed: host={host}, port={port}, database={database}, user={username}')
-            raise
-    else:
-        app.logger.debug('Reusing existing database connection from request context')
-        app.logger.debug(f'Connection type: {type(users_db)}')
-    
-    app.logger.debug('get_users_db() returning connection')
-    return users_db
-
-@app.teardown_appcontext
-def close_connection(exception):
-    """Close database connections at the end of request."""
-    # Close golf courses database
-    db = getattr(g, '_database', None)
-    if db is not None:
-        db.close()
-        app.logger.debug('Golf courses database connection closed')
-    
-    # Close users database
-    users_db = getattr(g, '_users_database', None)
-    if users_db is not None:
-        users_db.close()
-        app.logger.debug('Users database connection closed')
-
-def test_golf_courses_db_connection():
-    """Test connection to golf courses database."""
-    try:
-        import pg8000.native
-            
-        parsed = urlparse(DATABASE)
-        username = parsed.username
-        password = parsed.password
-        host = parsed.hostname
-        port = parsed.port or 5432
-        database = parsed.path.lstrip('/')
-        query_params = parse_qs(parsed.query)
-        ssl_mode = query_params.get('sslmode', ['prefer'])[0]
-        
-        app.logger.info('Testing PostgreSQL golf courses database connection')
-        
-        if ssl_mode == 'require':
-            conn = pg8000.native.Connection(
-                user=username,
-                password=password,
-                host=host,
-                port=port,
-                database=database,
-                ssl_context=True
-            )
-        else:
-            conn = pg8000.native.Connection(
-                user=username,
-                password=password,
-                host=host,
-                port=port,
-                database=database
-            )
-        
-        # Test connection with a simple query
-        result = conn.run('SELECT 1')
-        conn.close()
-        app.logger.info('PostgreSQL golf courses database connection successful')
-        return True
-    except Exception as e:
-        app.logger.error(f'Failed to connect to golf courses database: {str(e)}', exc_info=True)
-        return False
-
-def test_users_db_connection():
-    """Test connection to users database."""
-    try:
-        import pg8000.native
-            
-        parsed = urlparse(DATABASE)
-        username = parsed.username
-        password = parsed.password
-        host = parsed.hostname
-        port = parsed.port or 5432
-        database = parsed.path.lstrip('/')
-        query_params = parse_qs(parsed.query)
-        ssl_mode = query_params.get('sslmode', ['prefer'])[0]
-        
-        app.logger.info('Testing PostgreSQL users database connection')
-        
-        if ssl_mode == 'require':
-            conn = pg8000.native.Connection(
-                user=username,
-                password=password,
-                host=host,
-                port=port,
-                database=database,
-                ssl_context=True
-            )
-        else:
-            conn = pg8000.native.Connection(
-                user=username,
-                password=password,
-                host=host,
-                port=port,
-                database=database
-            )
-        
-        # Test connection with a simple query
-        result = conn.run('SELECT 1')
-        conn.close()
-        app.logger.info('PostgreSQL users database connection successful')
-        return True
-    except Exception as e:
-        app.logger.error(f'Failed to connect to users database: {str(e)}', exc_info=True)
-        return False
-
-def course_to_dict(row):
-    """Convert database row to dictionary."""
-
-    # pg8000 returns list of tuples with column names
-    # Assuming columns are: id, name, latitude, longitude, address, website, phone, timezone, uuid
-    if isinstance(row, (list, tuple)):
-        return {
-            'id': row[0],
-            'name': row[1],
-            'latitude': float(row[2]) if row[2] is not None else None,
-            'longitude': float(row[3]) if row[3] is not None else None,
-            'address': row[4],
-            'website': row[5],
-            'phone': row[6],
-            'timezone': row[7],
-            'uuid': row[8] if len(row) > 8 else None
-        }
-    else:
-        # If it's a dict-like object
-        return {
-            'id': row[0],
-            'name': row[1],
-            'latitude': float(row[2]) if row[2] is not None else None,
-            'longitude': float(row[3]) if row[3] is not None else None,
-            'address': row[4],
-            'website': row[5],
-            'phone': row[6],
-            'timezone': row[7],
-            'uuid': row[8] if len(row) > 8 else None
-        }
-
-def get_row_value(row, index):
-    """Get value from row by index - works with both SQLite Row objects and PostgreSQL tuples."""
-    return row[index]
-
-def user_to_dict(row):
-    """Convert users database row to dictionary."""
-    # pg8000 returns list of tuples with column names
-    # Assuming columns are: id, uuid, displayName, firstConnectionDate, lastActivityDate, isActive, email, passwordResetRequired, banned, bannedDate, bannedBy, banReason, role
-    if isinstance(row, (list, tuple)):
-        return {
-            'id': row[0],
-            'uuid': row[1],
-            'displayName': row[2],
-            'firstConnectionDate': row[3],
-            'lastActivityDate': row[4],
-            'isActive': row[5],
-            'email': row[6],
-            'passwordResetRequired': row[7],
-            'banned': row[8],
-            'bannedDate': row[9],
-            'bannedBy': row[10],
-            'banReason': row[11],
-            'role': row[12]
-        }
-    else:
-        # If it's a dict-like object
-        return {
-            'id': row[0],
-            'uuid': row[1],
-            'displayName': row[2],
-            'firstConnectionDate': row[3],
-            'lastActivityDate': row[4],
-            'isActive': row[5],
-            'email': row[6],
-            'passwordResetRequired': row[7],
-            'banned': row[8],
-            'bannedDate': row[9],
-            'bannedBy': row[10],
-            'banReason': row[11],
-            'role': row[12]
-        }
-
-def get_user_by_uuid(uuid):
-    """Get user by UUID from users database."""
-    users_db = get_users_db()
-    try:
-        result = users_db.run(
-            'SELECT * FROM users WHERE uuid = :uuid',
-            uuid=uuid
-            )
-        if result:
-            return result[0]
-        return None
-    except Exception as e:
-        app.logger.error(f'Error getting user by UUID: {str(e)}')
-        return None
-
-def get_user_by_email(email):
-    """Get user by email from users database."""
-    users_db = get_users_db()
-    try:
-        result = users_db.run(
-            'SELECT * FROM users WHERE email = :email',
-            email=email
-            )
-        if result:
-            return result[0]
-        return None
-    except Exception as e:
-        app.logger.error(f'Error getting user by email: {str(e)}')
-        return None
-
-def update_user_activity(uuid):
-    """Update user's last activity date."""
-    users_db = get_users_db()
-    try:
-        current_time = datetime.utcnow().isoformat()
-        users_db.run('''
-            UPDATE users 
-            SET "lastActivityDate" = :activity_date 
-            WHERE uuid = :uuid
-        ''', uuid=uuid, activity_date=current_time)
-    except Exception as e:
-        app.logger.error(f'Error updating user activity: {str(e)}')
-
-def calculate_distance(lat1, lon1, lat2, lon2):
-    """Calculate the great circle distance between two points on Earth in miles."""
-    R = 3959  # Earth's radius in miles
-    
-    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    
-    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
-    c = 2 * math.asin(math.sqrt(a))
-    
-    return R * c
-
-@app.route("/")
-@limiter.limit("10 per minute")
-def root_route():
-    """Root route with rate limiting."""
-    return redirect("https://www.dewygolf.com", code=302)
-
-@app.route("/search", methods=['GET', 'POST'])
-@limiter.limit("60 per minute")
+@app.route('/search', methods=['GET'])
 @require_api_key
-def search_courses():
-    """
-    Search for golf courses by various criteria:
-    - lat/lng: Find nearest courses
-    - city: Search by city name
-    - zipcode: Search by zipcode
-    - name: Search by course name
-    - limit: Number of results to return (default: 10)
+def search():
+    """Search golf courses endpoint (requires valid API key)."""
+    request_id = request.request_id
+    user = request.user
     
-    Requires API key authentication.
-    """
-    request_id = request.headers.get('X-Request-ID', 'N/A')
-    client_ip = request.remote_addr
-    api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
-    
-    app.logger.info(f'Search request received - Method: {request.method}, IP: {client_ip}, Request-ID: {request_id}, API-Key: {api_key[:8]}...')
+    api_logger.info(f"[{request_id}] Search initiated by user {user['id']} "
+                   f"({user['displayName']})")
     
     try:
-        # Get parameters from query string or JSON body
-        if request.method == 'POST':
-            data = request.get_json() or {}
-            app.logger.info(f'POST request with JSON body: {data}')
-        else:
-            data = request.args.to_dict()
-            app.logger.info(f'GET request with query params: {data}')
+        # Get search parameters
+        params = request.args.to_dict()
+        api_logger.debug(f"[{request_id}] Search parameters: {params}")
         
-        # Validate and sanitize input parameters
-        try:
-            validated_data = validate_search_params(data)
-        except ValueError as e:
-            log_security_event('INVALID_INPUT', f'Validation failed: {str(e)}')
-            return jsonify({
-                'success': False,
-                'error': str(e)
-            }), 400
+        # Perform search
+        results, total_count = search_golf_courses(params)
         
-        lat = validated_data.get('lat')
-        lng = validated_data.get('lng')
-        city = validated_data.get('city')
-        zipcode = validated_data.get('zipcode')
-        name = validated_data.get('name')
-        limit = validated_data.get('limit')
+        response_data = {
+            'success': True,
+            'count': len(results),
+            'total': total_count,
+            'limit': int(params.get('limit', 100)),
+            'offset': int(params.get('offset', 0)),
+            'results': results
+        }
         
-        app.logger.info(f'Search parameters - lat: {lat}, lng: {lng}, city: {city}, zipcode: {zipcode}, name: {name}, limit: {limit}')
+        api_logger.info(f"[{request_id}] ✓ Search successful: {len(results)} results returned")
         
-        # Check if golf courses database is available
-        if not golf_courses_db_available:
-            app.logger.error('Search request failed - Golf courses database not available')
-            return jsonify({
-                'success': False,
-                'error': 'Service temporarily unavailable - Database connection failed'
-            }), 503
+        return jsonify(response_data), 200
         
-        db = get_db()
-        
-        # Search by latitude/longitude (nearest courses)
-        if lat and lng:
-            try:
-                app.logger.info(f'Performing location-based search at coordinates: ({lat}, {lng})')
-                
-                # Get all courses and calculate distances
-                app.logger.info('Querying database for all golf courses')
-                
-                courses = db.run('SELECT * FROM golfcourse')
-                
-                app.logger.info(f'Retrieved {len(courses)} courses from database')
-                
-                courses_with_distance = []
-                
-                for course in courses:
-                    course_lat = float(get_row_value(course, 2))
-                    course_lng = float(get_row_value(course, 3))
-                    
-                    distance = calculate_distance(lat, lng, course_lat, course_lng)
-                    course_dict = course_to_dict(course)
-                    course_dict['distance_miles'] = round(distance, 2)
-                    courses_with_distance.append(course_dict)
-                
-                # Sort by distance and limit results
-                courses_with_distance.sort(key=lambda x: x['distance_miles'])
-                results = courses_with_distance[:limit]
-                
-                app.logger.info(f'Location search completed - Found {len(results)} courses within search criteria')
-                if results:
-                    app.logger.info(f'Nearest course: {results[0]["name"]} at {results[0]["distance_miles"]} miles')
-                
-                return jsonify({
-                    'success': True,
-                    'search_type': 'location',
-                    'coordinates': {'lat': lat, 'lng': lng},
-                    'results': results,
-                    'total_found': len(results)
-                })
-                
-            except Exception as e:
-                log_security_event('COORDINATE_ERROR', f'Error processing coordinates: {str(e)}')
-                app.logger.error(f'Error in location search: {str(e)}')
-                return jsonify({
-                    'success': False,
-                    'error': 'Error processing location search'
-                }), 400
-        
-        # Search by city name
-        elif city:
-            app.logger.info(f'Performing city-based search for: {city}')
-            
-            results = db.run(
-                'SELECT * FROM golfcourse WHERE address ILIKE :pattern OR name ILIKE :pattern LIMIT :limit',
-                pattern=f'%{city}%',
-                limit=limit
-            )
-            
-            app.logger.info(f'City search completed - Found {len(results)} courses matching "{city}"')
-            if results:
-                sample_names = [get_row_value(row, 1) for row in results[:3]]
-                app.logger.info(f'Sample results: {sample_names}')
-            
-            return jsonify({
-                'success': True,
-                'search_type': 'city',
-                'search_term': city,
-                'results': [course_to_dict(row) for row in results],
-                'total_found': len(results)
-            })
-        
-        # Search by zipcode
-        elif zipcode:
-            app.logger.info(f'Performing zipcode-based search for: {zipcode}')
-            
-            results = db.run(
-                'SELECT * FROM golfcourse WHERE address ILIKE :pattern LIMIT :limit',
-                pattern=f'%{zipcode}%',
-                limit=limit
-            )
-            
-            app.logger.info(f'Zipcode search completed - Found {len(results)} courses matching "{zipcode}"')
-            if results:
-                sample_names = [get_row_value(row, 1) for row in results[:3]]
-                app.logger.info(f'Sample results: {sample_names}')
-            
-            return jsonify({
-                'success': True,
-                'search_type': 'zipcode',
-                'search_term': zipcode,
-                'results': [course_to_dict(row) for row in results],
-                'total_found': len(results)
-            })
-        
-        # Search by course name
-        elif name:
-            app.logger.info(f'Performing name-based search for: {name}')
-
-            results = db.run(
-                'SELECT * FROM golfcourse WHERE name ILIKE :pattern LIMIT :limit',
-                pattern=f'%{name}%',
-                limit=limit
-                )
-            
-            app.logger.info(f'Name search completed - Found {len(results)} courses matching "{name}"')
-            if results:
-                sample_names = [get_row_value(row, 1) for row in results[:3]]
-                app.logger.info(f'Sample results: {sample_names}')
-            
-            return jsonify({
-                'success': True,
-                'search_type': 'name',
-                'search_term': name,
-                'results': [course_to_dict(row) for row in results],
-                'total_found': len(results)
-            })
-        
-        else:
-            log_security_event('MISSING_PARAMS', f'Search request missing required parameters - Provided data: {data}')
-            app.logger.warning(f'Search request missing required parameters - Provided data: {data}')
-            return jsonify({
-                'success': False,
-                'error': 'Please provide one of: lat/lng, city, zipcode, or name'
-            }), 400
-            
     except Exception as e:
-        log_security_event('SEARCH_ERROR', f'Unexpected error in search endpoint: {str(e)}')
-        app.logger.error(f'Unexpected error in search endpoint: {str(e)}', exc_info=True)
+        error_logger.error(f"[{request_id}] ✗ Search failed: {str(e)}")
+        error_logger.error(traceback.format_exc())
+        
         return jsonify({
             'success': False,
-            'error': 'Internal server error'
+            'error': 'Search failed',
+            'message': str(e)
         }), 500
 
-@app.route("/health")
-@limiter.limit("30 per minute")
-def health_check():
-    """Health check endpoint for monitoring."""
-    try:
-        health_status = {
-            'status': 'healthy',
-            'timestamp': datetime.utcnow().isoformat(),
-            'databases': {
-                'golf_courses': 'connected' if golf_courses_db_available else 'disconnected',
-                'users': 'connected' if users_db_available else 'disconnected'
-            }
-        }
-        
-        # Test golf courses database if available
-        if golf_courses_db_available:
-            try:
-                db = get_db()
-                result = db.run('SELECT 1')
-            except Exception as e:
-                health_status['databases']['golf_courses'] = 'error'
-                health_status['golf_courses_error'] = str(e)
-        
-        # Determine overall status
-        if not golf_courses_db_available:
-            health_status['status'] = 'unhealthy'
-            health_status['error'] = 'Golf courses database unavailable'
-            return jsonify(health_status), 503
-        
-        return jsonify(health_status)
-    except Exception as e:
-        app.logger.error(f'Health check failed: {str(e)}')
-        return jsonify({
-            'status': 'unhealthy',
-            'timestamp': datetime.utcnow().isoformat(),
-            'error': str(e)
-        }), 500
 
-@app.route("/api-info")
-@limiter.limit("10 per minute")
-def api_info():
-    """API information endpoint."""
+@app.route('/', methods=['GET'])
+def root():
+    """Root endpoint with API information."""
+    api_logger.info(f"Root endpoint accessed from {request.remote_addr}")
+    
     return jsonify({
-        'name': 'Dewy Golf Course API',
+        'service': 'Golf Course Search API',
         'version': '1.0.0',
-        'description': 'Golf course search API with location-based and text search capabilities',
-        'authentication': 'API key required',
-        'rate_limits': {
-            'search': '60 requests per minute',
-            'health': '30 requests per minute',
-            'root': '10 requests per minute'
-        },
         'endpoints': {
-            'search': '/search - Search golf courses',
-            'health': '/health - Health check',
-            'api_info': '/api-info - This information'
-        }
-    })
+            '/health': 'Health check endpoint (no auth required)',
+            '/search': 'Search golf courses (requires API key)',
+        },
+        'authentication': 'Provide API key in X-API-Key or Authorization header'
+    }), 200
 
-# Test database connections on startup
-golf_courses_db_available = False
-users_db_available = False
 
-# Test golf courses database connection
-if test_golf_courses_db_connection():
-    golf_courses_db_available = True
-    try:
-        # Try to get count if table exists
-        db = get_db()
-        result = db.run('SELECT COUNT(*) FROM golfcourse')
-        course_count = result[0][0]
-        app.logger.info(f'Golf courses database ready - Total courses: {course_count}')
-    except Exception as e:
-        app.logger.warning(f'Golf courses database connected but table may not exist: {str(e)}')
-        app.logger.info('Golf courses database connected (table creation required)')
-else:
-    app.logger.error('Golf courses database connection failed - API will not function properly')
+# ============================================================================
+# ERROR HANDLERS
+# ============================================================================
 
-# Log overall status
-if golf_courses_db_available and users_db_available:
-    app.logger.info('All database connections successful - API fully operational')
-elif golf_courses_db_available:
-    app.logger.warning('Only golf courses database available - User features disabled')
-else:
-    app.logger.error('Critical: No database connections available - API will not function')
+@app.errorhandler(404)
+def not_found(e):
+    error_logger.warning(f"404 Not Found: {request.path} from {request.remote_addr}")
+    return jsonify({
+        'error': 'Not Found',
+        'message': f'The requested URL {request.path} was not found'
+    }), 404
+
+
+@app.errorhandler(405)
+def method_not_allowed(e):
+    error_logger.warning(f"405 Method Not Allowed: {request.method} {request.path} "
+                        f"from {request.remote_addr}")
+    return jsonify({
+        'error': 'Method Not Allowed',
+        'message': f'The method {request.method} is not allowed for {request.path}'
+    }), 405
+
+
+@app.errorhandler(500)
+def internal_error(e):
+    error_logger.error(f"500 Internal Server Error: {str(e)}")
+    error_logger.error(traceback.format_exc())
+    return jsonify({
+        'error': 'Internal Server Error',
+        'message': 'An unexpected error occurred'
+    }), 500
+
+
+# ============================================================================
+# APPLICATION STARTUP
+# ============================================================================
+
+def main():
+    """Main application entry point."""
+    logger.info("Initializing Golf Course Search API...")
+    
+    # Initialize database connection pool
+    if not initialize_connection_pool():
+        logger.critical("Failed to initialize database connection pool. Exiting.")
+        sys.exit(1)
+    
+    # SSL Configuration
+    ssl_enabled = os.getenv('SSL_ENABLED', 'false').lower() == 'true'
+    ssl_cert = os.getenv('SSL_CERT_PATH', '/etc/ssl/certs/cert.pem')
+    ssl_key = os.getenv('SSL_KEY_PATH', '/etc/ssl/private/key.pem')
+    
+    host = os.getenv('HOST', '0.0.0.0')
+    port = int(os.getenv('PORT', '5000'))
+    debug = os.getenv('DEBUG', 'false').lower() == 'true'
+    
+    logger.info(f"Server configuration:")
+    logger.info(f"  Host: {host}")
+    logger.info(f"  Port: {port}")
+    logger.info(f"  SSL Enabled: {ssl_enabled}")
+    logger.info(f"  Debug Mode: {debug}")
+    
+    if ssl_enabled:
+        if os.path.exists(ssl_cert) and os.path.exists(ssl_key):
+            logger.info(f"  SSL Certificate: {ssl_cert}")
+            logger.info(f"  SSL Key: {ssl_key}")
+            logger.info("=" * 80)
+            logger.info("🚀 Starting server with SSL...")
+            app.run(
+                host=host,
+                port=port,
+                debug=debug,
+                ssl_context=(ssl_cert, ssl_key)
+            )
+        else:
+            error_logger.critical(f"SSL enabled but certificate files not found!")
+            error_logger.critical(f"  Expected cert: {ssl_cert}")
+            error_logger.critical(f"  Expected key: {ssl_key}")
+            logger.info("=" * 80)
+            logger.warning("⚠️  Starting server WITHOUT SSL...")
+            app.run(host=host, port=port, debug=debug)
+    else:
+        logger.info("=" * 80)
+        logger.info("🚀 Starting server WITHOUT SSL...")
+        app.run(host=host, port=port, debug=debug)
+
 
 if __name__ == '__main__':
-    app.logger.info('Starting Flask development server')
-    app.run(debug=True)
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("\n" + "=" * 80)
+        logger.info("Received shutdown signal (Ctrl+C)")
+        logger.info("Shutting down gracefully...")
+        if connection_pool:
+            connection_pool.closeall()
+            logger.info("✓ Database connection pool closed")
+        logger.info("✓ Application shutdown complete")
+        logger.info("=" * 80)
+    except Exception as e:
+        error_logger.critical(f"Fatal error during startup: {str(e)}")
+        error_logger.critical(traceback.format_exc())
+        sys.exit(1)
