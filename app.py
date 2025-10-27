@@ -74,69 +74,6 @@ logger.info(f"Database configuration loaded: host={DB_CONFIG['host']}, "
             f"port={DB_CONFIG['port']}, database={DB_CONFIG['database']}, "
             f"user={DB_CONFIG['user']}")
 
-# Connection pool configuration
-MIN_CONNECTIONS = int(os.getenv('DB_POOL_MIN', '2'))
-MAX_CONNECTIONS = int(os.getenv('DB_POOL_MAX', '10'))
-
-db_logger.info(f"Initializing connection pool: min={MIN_CONNECTIONS}, max={MAX_CONNECTIONS}")
-
-# Global connection pool
-connection_pool = None
-
-# ============================================================================
-# DATABASE CONNECTION POOL MANAGEMENT
-# ============================================================================
-
-def initialize_connection_pool():
-    """Initialize the database connection pool."""
-    global connection_pool
-    try:
-        db_logger.info("Creating database connection pool...")
-        connection_pool = psycopg2.pool.ThreadedConnectionPool(
-            MIN_CONNECTIONS,
-            MAX_CONNECTIONS,
-            **DB_CONFIG
-        )
-        db_logger.info("✓ Database connection pool created successfully")
-        
-        # Test the connection
-        test_conn = connection_pool.getconn()
-        test_conn.close()
-        connection_pool.putconn(test_conn)
-        db_logger.info("✓ Database connection test successful")
-        
-        return True
-    except Exception as e:
-        error_logger.critical(f"✗ Failed to initialize connection pool: {str(e)}")
-        error_logger.critical(traceback.format_exc())
-        return False
-
-
-def get_db_connection():
-    """Get a connection from the pool."""
-    try:
-        if connection_pool is None:
-            db_logger.error("Connection pool is not initialized")
-            raise Exception("Database connection pool not initialized")
-        
-        conn = connection_pool.getconn()
-        db_logger.debug(f"Connection acquired from pool. Pool status: {connection_pool._used} used")
-        return conn
-    except Exception as e:
-        error_logger.error(f"Failed to get connection from pool: {str(e)}")
-        raise
-
-
-def return_db_connection(conn):
-    """Return a connection to the pool."""
-    try:
-        if conn and connection_pool:
-            connection_pool.putconn(conn)
-            db_logger.debug(f"Connection returned to pool. Pool status: {connection_pool._used} used")
-    except Exception as e:
-        error_logger.error(f"Failed to return connection to pool: {str(e)}")
-
-
 # ============================================================================
 # DATABASE OPERATIONS
 # ============================================================================
