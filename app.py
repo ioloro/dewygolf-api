@@ -166,7 +166,10 @@ setup_logging()
 
 # Database configuration
 DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///golfcourses.db')
+USERS_DATABASE_URL = os.environ.get('USERS_DATABASE_URL', 'sqlite:///users.db')
+
 app.logger.info(f'DATABASE_URL: {DATABASE_URL}')
+app.logger.info(f'USERS_DATABASE_URL: {USERS_DATABASE_URL}')
 
 # Parse DATABASE_URL to determine database type
 if DATABASE_URL.startswith('postgresql://') or DATABASE_URL.startswith('postgres://'):
@@ -187,8 +190,27 @@ else:
     DATABASE = DATABASE_URL
     app.logger.info(f'Using SQLite database (default): {DATABASE}')
 
+# Parse USERS_DATABASE_URL
+if USERS_DATABASE_URL.startswith('postgresql://') or USERS_DATABASE_URL.startswith('postgres://'):
+    USERS_DB_TYPE = 'postgresql'
+    USERS_DATABASE = USERS_DATABASE_URL
+    app.logger.info('Using PostgreSQL for users database with pg8000')
+elif USERS_DATABASE_URL.startswith('sqlite:///'):
+    USERS_DB_TYPE = 'sqlite'
+    USERS_DATABASE = USERS_DATABASE_URL.replace('sqlite:///', '')
+    app.logger.info(f'Using SQLite for users database: {USERS_DATABASE}')
+elif USERS_DATABASE_URL.startswith('sqlite://'):
+    USERS_DB_TYPE = 'sqlite'
+    USERS_DATABASE = USERS_DATABASE_URL.replace('sqlite://', '')
+    app.logger.info(f'Using SQLite for users database: {USERS_DATABASE}')
+else:
+    # Default to SQLite
+    USERS_DB_TYPE = 'sqlite'
+    USERS_DATABASE = USERS_DATABASE_URL
+    app.logger.info(f'Using SQLite for users database (default): {USERS_DATABASE}')
+
 def get_db():
-    """Get database connection for the current request."""
+    """Get golf courses database connection for the current request."""
     db = getattr(g, '_database', None)
     if db is None:
         if DB_TYPE == 'postgresql':
@@ -244,16 +266,80 @@ def get_db():
             app.logger.debug('SQLite connection established')
     return db
 
+def get_users_db():
+    """Get users database connection for the current request."""
+    users_db = getattr(g, '_users_database', None)
+    if users_db is None:
+        if USERS_DB_TYPE == 'postgresql':
+            try:
+                import pg8000.native
+                
+                # Parse the PostgreSQL URL
+                parsed = urlparse(USERS_DATABASE)
+                
+                # Extract connection parameters
+                username = parsed.username
+                password = parsed.password
+                host = parsed.hostname
+                port = parsed.port or 5432
+                database = parsed.path.lstrip('/')
+                
+                # Parse query parameters for SSL settings
+                query_params = parse_qs(parsed.query)
+                ssl_mode = query_params.get('sslmode', ['prefer'])[0]
+                
+                app.logger.info(f'Connecting to Users PostgreSQL: host={host}, port={port}, database={database}, user={username}, sslmode={ssl_mode}')
+                
+                # Create connection with SSL if required
+                if ssl_mode == 'require':
+                    users_db = g._users_database = pg8000.native.Connection(
+                        user=username,
+                        password=password,
+                        host=host,
+                        port=port,
+                        database=database,
+                        ssl_context=True
+                    )
+                else:
+                    users_db = g._users_database = pg8000.native.Connection(
+                        user=username,
+                        password=password,
+                        host=host,
+                        port=port,
+                        database=database
+                    )
+                
+                app.logger.info('Users PostgreSQL connection established successfully')
+                
+            except ImportError:
+                app.logger.error('pg8000 not installed. Install with: pip install pg8000')
+                raise
+            except Exception as e:
+                app.logger.error(f'Failed to connect to Users PostgreSQL: {str(e)}', exc_info=True)
+                raise
+        else:
+            users_db = g._users_database = sqlite3.connect(USERS_DATABASE)
+            users_db.row_factory = sqlite3.Row
+            app.logger.debug('Users SQLite connection established')
+    return users_db
+
 @app.teardown_appcontext
 def close_connection(exception):
-    """Close database connection at the end of request."""
+    """Close database connections at the end of request."""
+    # Close golf courses database
     db = getattr(g, '_database', None)
     if db is not None:
         db.close()
-        app.logger.debug('Database connection closed')
+        app.logger.debug('Golf courses database connection closed')
+    
+    # Close users database
+    users_db = getattr(g, '_users_database', None)
+    if users_db is not None:
+        users_db.close()
+        app.logger.debug('Users database connection closed')
 
-def init_db():
-    """Initialize the database with required tables."""
+def test_golf_courses_db_connection():
+    """Test connection to golf courses database."""
     try:
         if DB_TYPE == 'postgresql':
             import pg8000.native
@@ -267,7 +353,7 @@ def init_db():
             query_params = parse_qs(parsed.query)
             ssl_mode = query_params.get('sslmode', ['prefer'])[0]
             
-            app.logger.info('Initializing PostgreSQL database tables')
+            app.logger.info('Testing PostgreSQL golf courses database connection')
             
             if ssl_mode == 'require':
                 conn = pg8000.native.Connection(
@@ -287,47 +373,73 @@ def init_db():
                     database=database
                 )
             
-            conn.run('''
-                CREATE TABLE IF NOT EXISTS golfcourse (
-                    id SERIAL PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    latitude REAL NOT NULL,
-                    longitude REAL NOT NULL,
-                    address TEXT,
-                    website TEXT,
-                    phone TEXT,
-                    timezone TEXT,
-                    uuid TEXT DEFAULT 'constant'
-                )
-            ''')
-            
+            # Test connection with a simple query
+            result = conn.run('SELECT 1')
             conn.close()
-            app.logger.info('PostgreSQL database tables created successfully')
+            app.logger.info('PostgreSQL golf courses database connection successful')
+            return True
         else:
-            app.logger.info('Initializing SQLite database tables')
+            app.logger.info('Testing SQLite golf courses database connection')
             conn = sqlite3.connect(DATABASE)
             cursor = conn.cursor()
-            
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS golfcourse (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
-                    latitude REAL NOT NULL,
-                    longitude REAL NOT NULL,
-                    address TEXT,
-                    website TEXT,
-                    phone TEXT,
-                    timezone TEXT,
-                    uuid TEXT DEFAULT 'constant'
-                )
-            ''')
-            
-            conn.commit()
+            cursor.execute('SELECT 1')
             conn.close()
-            app.logger.info('SQLite database tables created successfully')
-        return True
+            app.logger.info('SQLite golf courses database connection successful')
+            return True
     except Exception as e:
-        app.logger.error(f'Failed to initialize database: {str(e)}', exc_info=True)
+        app.logger.error(f'Failed to connect to golf courses database: {str(e)}', exc_info=True)
+        return False
+
+def test_users_db_connection():
+    """Test connection to users database."""
+    try:
+        if USERS_DB_TYPE == 'postgresql':
+            import pg8000.native
+            
+            parsed = urlparse(USERS_DATABASE)
+            username = parsed.username
+            password = parsed.password
+            host = parsed.hostname
+            port = parsed.port or 5432
+            database = parsed.path.lstrip('/')
+            query_params = parse_qs(parsed.query)
+            ssl_mode = query_params.get('sslmode', ['prefer'])[0]
+            
+            app.logger.info('Testing PostgreSQL users database connection')
+            
+            if ssl_mode == 'require':
+                conn = pg8000.native.Connection(
+                    user=username,
+                    password=password,
+                    host=host,
+                    port=port,
+                    database=database,
+                    ssl_context=True
+                )
+            else:
+                conn = pg8000.native.Connection(
+                    user=username,
+                    password=password,
+                    host=host,
+                    port=port,
+                    database=database
+                )
+            
+            # Test connection with a simple query
+            result = conn.run('SELECT 1')
+            conn.close()
+            app.logger.info('PostgreSQL users database connection successful')
+            return True
+        else:
+            app.logger.info('Testing SQLite users database connection')
+            conn = sqlite3.connect(USERS_DATABASE)
+            cursor = conn.cursor()
+            cursor.execute('SELECT 1')
+            conn.close()
+            app.logger.info('SQLite users database connection successful')
+            return True
+    except Exception as e:
+        app.logger.error(f'Failed to connect to users database: {str(e)}', exc_info=True)
         return False
 
 def course_to_dict(row):
@@ -381,6 +493,128 @@ def get_row_value(row, index):
     else:
         # For SQLite, we can still use index
         return row[index]
+
+def user_to_dict(row):
+    """Convert users database row to dictionary."""
+    if USERS_DB_TYPE == 'postgresql':
+        # pg8000 returns list of tuples with column names
+        # Assuming columns are: id, uuid, displayName, firstConnectionDate, lastActivityDate, isActive, email, passwordResetRequired, banned, bannedDate, bannedBy, banReason, role
+        if isinstance(row, (list, tuple)):
+            return {
+                'id': row[0],
+                'uuid': row[1],
+                'displayName': row[2],
+                'firstConnectionDate': row[3],
+                'lastActivityDate': row[4],
+                'isActive': row[5],
+                'email': row[6],
+                'passwordResetRequired': row[7],
+                'banned': row[8],
+                'bannedDate': row[9],
+                'bannedBy': row[10],
+                'banReason': row[11],
+                'role': row[12]
+            }
+        else:
+            # If it's a dict-like object
+            return {
+                'id': row[0],
+                'uuid': row[1],
+                'displayName': row[2],
+                'firstConnectionDate': row[3],
+                'lastActivityDate': row[4],
+                'isActive': row[5],
+                'email': row[6],
+                'passwordResetRequired': row[7],
+                'banned': row[8],
+                'bannedDate': row[9],
+                'bannedBy': row[10],
+                'banReason': row[11],
+                'role': row[12]
+            }
+    else:
+        # SQLite with row_factory
+        return {
+            'id': row['id'],
+            'uuid': row['uuid'],
+            'displayName': row['displayName'],
+            'firstConnectionDate': row['firstConnectionDate'],
+            'lastActivityDate': row['lastActivityDate'],
+            'isActive': row['isActive'],
+            'email': row['email'],
+            'passwordResetRequired': row['passwordResetRequired'],
+            'banned': row['banned'],
+            'bannedDate': row['bannedDate'],
+            'bannedBy': row['bannedBy'],
+            'banReason': row['banReason'],
+            'role': row['role']
+        }
+
+def get_user_by_uuid(uuid):
+    """Get user by UUID from users database."""
+    users_db = get_users_db()
+    try:
+        if USERS_DB_TYPE == 'postgresql':
+            result = users_db.run(
+                'SELECT * FROM users WHERE uuid = :uuid',
+                uuid=uuid
+            )
+            if result:
+                return result[0]
+        else:
+            cursor = users_db.cursor()
+            cursor.execute('SELECT * FROM users WHERE uuid = ?', (uuid,))
+            result = cursor.fetchone()
+            if result:
+                return result
+        return None
+    except Exception as e:
+        app.logger.error(f'Error getting user by UUID: {str(e)}')
+        return None
+
+def get_user_by_email(email):
+    """Get user by email from users database."""
+    users_db = get_users_db()
+    try:
+        if USERS_DB_TYPE == 'postgresql':
+            result = users_db.run(
+                'SELECT * FROM users WHERE email = :email',
+                email=email
+            )
+            if result:
+                return result[0]
+        else:
+            cursor = users_db.cursor()
+            cursor.execute('SELECT * FROM users WHERE email = ?', (email,))
+            result = cursor.fetchone()
+            if result:
+                return result
+        return None
+    except Exception as e:
+        app.logger.error(f'Error getting user by email: {str(e)}')
+        return None
+
+def update_user_activity(uuid):
+    """Update user's last activity date."""
+    users_db = get_users_db()
+    try:
+        current_time = datetime.utcnow().isoformat()
+        if USERS_DB_TYPE == 'postgresql':
+            users_db.run('''
+                UPDATE users 
+                SET "lastActivityDate" = :activity_date 
+                WHERE uuid = :uuid
+            ''', uuid=uuid, activity_date=current_time)
+        else:
+            cursor = users_db.cursor()
+            cursor.execute('''
+                UPDATE users 
+                SET lastActivityDate = ? 
+                WHERE uuid = ?
+            ''', (current_time, uuid))
+            users_db.commit()
+    except Exception as e:
+        app.logger.error(f'Error updating user activity: {str(e)}')
 
 def calculate_distance(lat1, lon1, lat2, lon2):
     """Calculate the great circle distance between two points on Earth in miles."""
@@ -448,6 +682,14 @@ def search_courses():
         limit = validated_data.get('limit')
         
         app.logger.info(f'Search parameters - lat: {lat}, lng: {lng}, city: {city}, zipcode: {zipcode}, name: {name}, limit: {limit}')
+        
+        # Check if golf courses database is available
+        if not golf_courses_db_available:
+            app.logger.error('Search request failed - Golf courses database not available')
+            return jsonify({
+                'success': False,
+                'error': 'Service temporarily unavailable - Database connection failed'
+            }), 503
         
         db = get_db()
         
@@ -620,20 +862,50 @@ def search_courses():
 def health_check():
     """Health check endpoint for monitoring."""
     try:
-        # Test database connection
-        db = get_db()
-        if DB_TYPE == 'postgresql':
-            result = db.run('SELECT 1')
-        else:
-            cursor = db.cursor()
-            cursor.execute('SELECT 1')
-            result = cursor.fetchone()
-        
-        return jsonify({
+        health_status = {
             'status': 'healthy',
             'timestamp': datetime.utcnow().isoformat(),
-            'database': 'connected'
-        })
+            'databases': {
+                'golf_courses': 'connected' if golf_courses_db_available else 'disconnected',
+                'users': 'connected' if users_db_available else 'disconnected'
+            }
+        }
+        
+        # Test golf courses database if available
+        if golf_courses_db_available:
+            try:
+                db = get_db()
+                if DB_TYPE == 'postgresql':
+                    result = db.run('SELECT 1')
+                else:
+                    cursor = db.cursor()
+                    cursor.execute('SELECT 1')
+                    result = cursor.fetchone()
+            except Exception as e:
+                health_status['databases']['golf_courses'] = 'error'
+                health_status['golf_courses_error'] = str(e)
+        
+        # Test users database if available
+        if users_db_available:
+            try:
+                users_db = get_users_db()
+                if USERS_DB_TYPE == 'postgresql':
+                    result = users_db.run('SELECT 1')
+                else:
+                    cursor = users_db.cursor()
+                    cursor.execute('SELECT 1')
+                    result = cursor.fetchone()
+            except Exception as e:
+                health_status['databases']['users'] = 'error'
+                health_status['users_error'] = str(e)
+        
+        # Determine overall status
+        if not golf_courses_db_available:
+            health_status['status'] = 'unhealthy'
+            health_status['error'] = 'Golf courses database unavailable'
+            return jsonify(health_status), 503
+        
+        return jsonify(health_status)
     except Exception as e:
         app.logger.error(f'Health check failed: {str(e)}')
         return jsonify({
@@ -663,52 +935,57 @@ def api_info():
         }
     })
 
-# Initialize database on startup
-if init_db():
+# Test database connections on startup
+golf_courses_db_available = False
+users_db_available = False
+
+# Test golf courses database connection
+if test_golf_courses_db_connection():
+    golf_courses_db_available = True
     try:
+        # Try to get count if table exists
+        db = get_db()
         if DB_TYPE == 'postgresql':
-            import pg8000.native
-            
-            parsed = urlparse(DATABASE)
-            username = parsed.username
-            password = parsed.password
-            host = parsed.hostname
-            port = parsed.port or 5432
-            database = parsed.path.lstrip('/')
-            query_params = parse_qs(parsed.query)
-            ssl_mode = query_params.get('sslmode', ['prefer'])[0]
-            
-            if ssl_mode == 'require':
-                conn = pg8000.native.Connection(
-                    user=username,
-                    password=password,
-                    host=host,
-                    port=port,
-                    database=database,
-                    ssl_context=True
-                )
-            else:
-                conn = pg8000.native.Connection(
-                    user=username,
-                    password=password,
-                    host=host,
-                    port=port,
-                    database=database
-                )
-            
-            result = conn.run('SELECT COUNT(*) FROM golfcourse')
+            result = db.run('SELECT COUNT(*) FROM golfcourse')
             course_count = result[0][0]
-            conn.close()
-            app.logger.info(f'PostgreSQL connection successful - Total courses in database: {course_count}')
         else:
-            conn = sqlite3.connect(DATABASE)
-            cursor = conn.cursor()
+            cursor = db.cursor()
             cursor.execute('SELECT COUNT(*) FROM golfcourse')
             course_count = cursor.fetchone()[0]
-            conn.close()
-            app.logger.info(f'SQLite connection successful - Total courses in database: {course_count}')
+        app.logger.info(f'Golf courses database ready - Total courses: {course_count}')
     except Exception as e:
-        app.logger.error(f'Database connection test failed: {str(e)}', exc_info=True)
+        app.logger.warning(f'Golf courses database connected but table may not exist: {str(e)}')
+        app.logger.info('Golf courses database connected (table creation required)')
+else:
+    app.logger.error('Golf courses database connection failed - API will not function properly')
+
+# Test users database connection
+if test_users_db_connection():
+    users_db_available = True
+    try:
+        # Try to get count if table exists
+        users_db = get_users_db()
+        if USERS_DB_TYPE == 'postgresql':
+            result = users_db.run('SELECT COUNT(*) FROM users')
+            user_count = result[0][0]
+        else:
+            cursor = users_db.cursor()
+            cursor.execute('SELECT COUNT(*) FROM users')
+            user_count = cursor.fetchone()[0]
+        app.logger.info(f'Users database ready - Total users: {user_count}')
+    except Exception as e:
+        app.logger.warning(f'Users database connected but table may not exist: {str(e)}')
+        app.logger.info('Users database connected (table creation required)')
+else:
+    app.logger.error('Users database connection failed - User features will not be available')
+
+# Log overall status
+if golf_courses_db_available and users_db_available:
+    app.logger.info('All database connections successful - API fully operational')
+elif golf_courses_db_available:
+    app.logger.warning('Only golf courses database available - User features disabled')
+else:
+    app.logger.error('Critical: No database connections available - API will not function')
 
 if __name__ == '__main__':
     app.logger.info('Starting Flask development server')
