@@ -3,6 +3,7 @@
 Golf Course Search API
 A production-ready Flask application with SSL, database health checks, 
 and API key authentication for searching golf courses.
+Uses pg8000 (pure Python PostgreSQL driver)
 """
 
 import os
@@ -10,10 +11,8 @@ import logging
 import sys
 from datetime import datetime
 from typing import Dict, Any, Optional, Tuple
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from psycopg2 import pool
-from flask import Flask, request, jsonify, Response
+import pg8000.native
+from flask import Flask, request, jsonify
 from functools import wraps
 import traceback
 import uuid as uuid_lib
@@ -64,7 +63,7 @@ app.config['JSON_SORT_KEYS'] = False
 # Database configuration from environment variables
 DB_CONFIG = {
     'host': os.getenv('DB_HOST', 'localhost'),
-    'port': os.getenv('DB_PORT', '5432'),
+    'port': int(os.getenv('DB_PORT', '5432')),
     'database': os.getenv('DB_NAME', 'golf_db'),
     'user': os.getenv('DB_USER', 'postgres'),
     'password': os.getenv('DB_PASSWORD', ''),
@@ -74,9 +73,23 @@ logger.info(f"Database configuration loaded: host={DB_CONFIG['host']}, "
             f"port={DB_CONFIG['port']}, database={DB_CONFIG['database']}, "
             f"user={DB_CONFIG['user']}")
 
+db_logger.info("Using pg8000 pure Python PostgreSQL driver (native interface)")
+
 # ============================================================================
 # DATABASE OPERATIONS
 # ============================================================================
+
+def get_db_connection():
+    """Get a new database connection using pg8000.native."""
+    try:
+        db_logger.debug("Creating new database connection...")
+        conn = pg8000.native.Connection(**DB_CONFIG)
+        db_logger.debug("✓ Database connection created")
+        return conn
+    except Exception as e:
+        error_logger.error(f"✗ Failed to create database connection: {str(e)}")
+        raise
+
 
 def check_database_health() -> Tuple[bool, Dict[str, Any]]:
     """
@@ -102,17 +115,15 @@ def check_database_health() -> Tuple[bool, Dict[str, Any]]:
         health_status['database_connected'] = True
         db_logger.info("✓ Database connection successful")
         
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
         # Check if golfcourse table exists
         db_logger.debug("Checking if golfcourse table exists...")
-        cursor.execute("""
+        result = conn.run("""
             SELECT EXISTS (
                 SELECT FROM information_schema.tables 
                 WHERE table_name = 'golfcourse'
             );
         """)
-        table_exists = cursor.fetchone()['exists']
+        table_exists = result[0][0] if result else False
         health_status['golfcourse_table_exists'] = table_exists
         
         if table_exists:
@@ -120,15 +131,13 @@ def check_database_health() -> Tuple[bool, Dict[str, Any]]:
             
             # Try to query the table
             db_logger.debug("Attempting to query golfcourse table...")
-            cursor.execute("SELECT COUNT(*) as count FROM golfcourse;")
-            result = cursor.fetchone()
-            health_status['row_count'] = result['count']
+            result = conn.run("SELECT COUNT(*) as count FROM golfcourse;")
+            row_count = result[0][0] if result else 0
+            health_status['row_count'] = row_count
             health_status['golfcourse_table_accessible'] = True
-            db_logger.info(f"✓ golfcourse table accessible with {result['count']} rows")
+            db_logger.info(f"✓ golfcourse table accessible with {row_count} rows")
         else:
             db_logger.warning("✗ golfcourse table does not exist")
-        
-        cursor.close()
         
         is_healthy = (health_status['database_connected'] and 
                      health_status['golfcourse_table_exists'] and 
@@ -145,7 +154,8 @@ def check_database_health() -> Tuple[bool, Dict[str, Any]]:
         
     finally:
         if conn:
-            return_db_connection(conn)
+            conn.close()
+            db_logger.debug("Database connection closed")
 
 
 def verify_api_key(api_key: str) -> Optional[Dict[str, Any]]:
@@ -164,80 +174,78 @@ def verify_api_key(api_key: str) -> Optional[Dict[str, Any]]:
     conn = None
     try:
         conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         # Check if user exists
         auth_logger.debug(f"Querying users table for API key: {api_key[:8]}...")
-        cursor.execute("""
+        result = conn.run("""
             SELECT id, uuid, "displayName", "isActive", banned, 
                    "lastActivityDate", email, role
             FROM users 
-            WHERE uuid = %s;
-        """, (api_key,))
+            WHERE uuid = :uuid;
+        """, uuid=api_key)
         
-        user = cursor.fetchone()
-        
-        if user:
+        if result:
+            # Convert tuple result to dict
+            columns = ['id', 'uuid', 'displayName', 'isActive', 'banned', 'lastActivityDate', 'email', 'role']
+            user = dict(zip(columns, result[0]))
+            
             auth_logger.info(f"✓ User found: id={user['id']}, displayName={user['displayName']}")
             
             # Check if user is banned
             if user['banned']:
                 auth_logger.warning(f"✗ User {user['id']} is BANNED. Access denied.")
-                cursor.close()
+                conn.close()
                 return None
             
             # Check if user is active
             if not user['isActive']:
                 auth_logger.warning(f"✗ User {user['id']} is INACTIVE. Access denied.")
-                cursor.close()
+                conn.close()
                 return None
             
             # Update last activity date
             auth_logger.debug(f"Updating lastActivityDate for user {user['id']}...")
             current_time = datetime.utcnow().isoformat()
-            cursor.execute("""
+            conn.run("""
                 UPDATE users 
-                SET "lastActivityDate" = %s 
-                WHERE id = %s;
-            """, (current_time, user['id']))
-            conn.commit()
+                SET "lastActivityDate" = :activity_date 
+                WHERE id = :user_id;
+            """, activity_date=current_time, user_id=user['id'])
             auth_logger.info(f"✓ User {user['id']} validated and activity updated")
             
-            cursor.close()
-            return dict(user)
+            conn.close()
+            return user
         else:
             # User doesn't exist, create new user
             auth_logger.info(f"User not found. Creating new user with API key: {api_key[:8]}...")
             
             current_time = datetime.utcnow().isoformat()
-            cursor.execute("""
+            result = conn.run("""
                 INSERT INTO users (
                     uuid, "displayName", "firstConnectionDate", 
                     "isActive", "lastActivityDate"
                 )
-                VALUES (%s, %s, %s, %s, %s)
+                VALUES (:uuid, :display_name, :first_conn, :is_active, :last_activity)
                 RETURNING id, uuid, "displayName", "isActive", banned;
-            """, (api_key, f'User_{api_key[:8]}', current_time, True, current_time))
+            """, uuid=api_key, display_name=f'User_{api_key[:8]}', 
+                first_conn=current_time, is_active=True, last_activity=current_time)
             
-            new_user = cursor.fetchone()
-            conn.commit()
+            # Convert tuple result to dict
+            columns = ['id', 'uuid', 'displayName', 'isActive', 'banned']
+            new_user = dict(zip(columns, result[0]))
             
             auth_logger.info(f"✓ NEW USER CREATED: id={new_user['id']}, "
                            f"displayName={new_user['displayName']}")
             
-            cursor.close()
-            return dict(new_user)
+            conn.close()
+            return new_user
             
     except Exception as e:
         error_logger.error(f"✗ API key verification failed: {str(e)}")
         error_logger.error(traceback.format_exc())
         if conn:
-            conn.rollback()
+            conn.close()
         return None
-        
-    finally:
-        if conn:
-            return_db_connection(conn)
 
 
 def search_golf_courses(params: Dict[str, str]) -> Tuple[list, int]:
@@ -255,53 +263,45 @@ def search_golf_courses(params: Dict[str, str]) -> Tuple[list, int]:
     conn = None
     try:
         conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         # Build dynamic query
         where_clauses = []
-        query_params = []
-        param_counter = 1
+        query_params = {}
         
         # Name search (case-insensitive partial match)
         if 'name' in params and params['name']:
-            where_clauses.append(f"name ILIKE ${param_counter}")
-            query_params.append(f"%{params['name']}%")
-            param_counter += 1
+            where_clauses.append("name ILIKE :name")
+            query_params['name'] = f"%{params['name']}%"
             api_logger.debug(f"Added name filter: ILIKE '%{params['name']}%'")
         
         # Address search (case-insensitive partial match)
         if 'address' in params and params['address']:
-            where_clauses.append(f"address ILIKE ${param_counter}")
-            query_params.append(f"%{params['address']}%")
-            param_counter += 1
+            where_clauses.append("address ILIKE :address")
+            query_params['address'] = f"%{params['address']}%"
             api_logger.debug(f"Added address filter: ILIKE '%{params['address']}%'")
         
         # Phone search (exact match)
         if 'phone' in params and params['phone']:
-            where_clauses.append(f"phone = ${param_counter}")
-            query_params.append(params['phone'])
-            param_counter += 1
+            where_clauses.append("phone = :phone")
+            query_params['phone'] = params['phone']
             api_logger.debug(f"Added phone filter: = '{params['phone']}'")
         
         # Website search (case-insensitive partial match)
         if 'website' in params and params['website']:
-            where_clauses.append(f"website ILIKE ${param_counter}")
-            query_params.append(f"%{params['website']}%")
-            param_counter += 1
+            where_clauses.append("website ILIKE :website")
+            query_params['website'] = f"%{params['website']}%"
             api_logger.debug(f"Added website filter: ILIKE '%{params['website']}%'")
         
         # Timezone search (exact match)
         if 'timezone' in params and params['timezone']:
-            where_clauses.append(f"timezone = ${param_counter}")
-            query_params.append(params['timezone'])
-            param_counter += 1
+            where_clauses.append("timezone = :timezone")
+            query_params['timezone'] = params['timezone']
             api_logger.debug(f"Added timezone filter: = '{params['timezone']}'")
         
         # UUID search (exact match)
         if 'uuid' in params and params['uuid']:
-            where_clauses.append(f"uuid = ${param_counter}")
-            query_params.append(params['uuid'])
-            param_counter += 1
+            where_clauses.append("uuid = :uuid")
+            query_params['uuid'] = params['uuid']
             api_logger.debug(f"Added uuid filter: = '{params['uuid']}'")
         
         # Latitude/Longitude radius search
@@ -312,69 +312,68 @@ def search_golf_courses(params: Dict[str, str]) -> Tuple[list, int]:
                 radius_km = float(params['radius'])
                 
                 # Using Haversine formula for distance calculation
-                where_clauses.append(f"""
+                where_clauses.append("""
                     (6371 * acos(
-                        cos(radians(${param_counter})) * cos(radians(latitude)) * 
-                        cos(radians(longitude) - radians(${param_counter + 1})) + 
-                        sin(radians(${param_counter})) * sin(radians(latitude))
-                    )) <= ${param_counter + 2}
+                        cos(radians(:lat)) * cos(radians(latitude)) * 
+                        cos(radians(longitude) - radians(:lon)) + 
+                        sin(radians(:lat2)) * sin(radians(latitude))
+                    )) <= :radius
                 """)
-                query_params.extend([lat, lon, radius_km])
-                param_counter += 3
+                query_params['lat'] = lat
+                query_params['lon'] = lon
+                query_params['lat2'] = lat  # Used twice in formula
+                query_params['radius'] = radius_km
                 api_logger.debug(f"Added radius search: lat={lat}, lon={lon}, radius={radius_km}km")
             except ValueError as e:
                 api_logger.warning(f"Invalid lat/lon/radius values: {e}")
         
         # Build final query
-        base_query = "SELECT * FROM golfcourse"
+        base_query = "SELECT id, name, latitude, longitude, address, website, phone, timezone, uuid FROM golfcourse"
         if where_clauses:
-            # Convert $1, $2 format to %s for psycopg2
-            where_sql = " AND ".join(where_clauses)
-            where_sql = where_sql.replace('$', '%s_').replace('%s_', '%s', 100)
-            for i in range(len(query_params), 0, -1):
-                where_sql = where_sql.replace(f'%s', '%s', 1)
-            query = f"{base_query} WHERE {where_sql}"
+            query = f"{base_query} WHERE {' AND '.join(where_clauses)}"
         else:
             query = base_query
         
         # Add pagination
         limit = min(int(params.get('limit', 100)), 1000)  # Max 1000 results
         offset = int(params.get('offset', 0))
-        query += f" LIMIT {limit} OFFSET {offset}"
+        query += f" LIMIT :limit OFFSET :offset"
+        query_params['limit'] = limit
+        query_params['offset'] = offset
         
         api_logger.debug(f"Executing query: {query}")
         api_logger.debug(f"Query parameters: {query_params}")
         
-        cursor.execute(query, query_params)
-        results = cursor.fetchall()
+        result = conn.run(query, **query_params)
+        
+        # Convert results to list of dicts
+        columns = ['id', 'name', 'latitude', 'longitude', 'address', 'website', 'phone', 'timezone', 'uuid']
+        results = [dict(zip(columns, row)) for row in result]
         
         # Get total count
         count_query = "SELECT COUNT(*) as total FROM golfcourse"
         if where_clauses:
-            where_sql = " AND ".join(where_clauses)
-            where_sql = where_sql.replace('$', '%s_').replace('%s_', '%s', 100)
-            for i in range(len(query_params), 0, -1):
-                where_sql = where_sql.replace(f'%s', '%s', 1)
-            count_query += f" WHERE {where_sql}"
+            count_params = {k: v for k, v in query_params.items() if k not in ['limit', 'offset']}
+            count_query += f" WHERE {' AND '.join(where_clauses)}"
+            count_result = conn.run(count_query, **count_params)
+        else:
+            count_result = conn.run(count_query)
         
-        cursor.execute(count_query, query_params)
-        total_count = cursor.fetchone()['total']
+        total_count = count_result[0][0] if count_result else 0
         
-        cursor.close()
+        conn.close()
         
         api_logger.info(f"✓ Search completed: {len(results)} results returned, "
                        f"{total_count} total matches")
         
-        return [dict(row) for row in results], total_count
+        return results, total_count
         
     except Exception as e:
         error_logger.error(f"✗ Golf course search failed: {str(e)}")
         error_logger.error(traceback.format_exc())
-        raise
-        
-    finally:
         if conn:
-            return_db_connection(conn)
+            conn.close()
+        raise
 
 
 # ============================================================================
@@ -550,9 +549,15 @@ def main():
     """Main application entry point."""
     logger.info("Initializing Golf Course Search API...")
     
-    # Initialize database connection pool
-    if not initialize_connection_pool():
-        logger.critical("Failed to initialize database connection pool. Exiting.")
+    # Test database connection
+    try:
+        db_logger.info("Testing database connection...")
+        test_conn = get_db_connection()
+        test_conn.close()
+        db_logger.info("✓ Database connection test successful")
+    except Exception as e:
+        error_logger.critical(f"✗ Database connection test failed: {str(e)}")
+        error_logger.critical("Please check your database configuration")
         sys.exit(1)
     
     # SSL Configuration
@@ -602,9 +607,6 @@ if __name__ == '__main__':
         logger.info("\n" + "=" * 80)
         logger.info("Received shutdown signal (Ctrl+C)")
         logger.info("Shutting down gracefully...")
-        if connection_pool:
-            connection_pool.closeall()
-            logger.info("✓ Database connection pool closed")
         logger.info("✓ Application shutdown complete")
         logger.info("=" * 80)
     except Exception as e:
