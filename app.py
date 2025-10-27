@@ -57,80 +57,135 @@ def require_api_key(f):
     """Decorator to require API key authentication."""
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        app.logger.debug(f'require_api_key decorator called for endpoint: {request.endpoint}')
+        app.logger.debug(f'Request method: {request.method}, Path: {request.path}')
+        app.logger.debug(f'Request from: {request.remote_addr}, User-Agent: {request.headers.get("User-Agent", "N/A")}')
+        
+        # Extract API key from headers or query params
         api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
         
+        app.logger.debug(f'API key source: {"header" if request.headers.get("X-API-Key") else "query_param" if request.args.get("api_key") else "none"}')
+        
         if not api_key:
-            app.logger.warning(f'API request without key from {request.remote_addr}')
+            app.logger.warning(f'API request without key from {request.remote_addr} to {request.endpoint}')
+            log_security_event('API_KEY_MISSING', f'No API key provided from {request.remote_addr}')
             return jsonify({'error': 'API key required'}), 401
         
+        # Mask API key for logging (show first 8 chars only)
+        masked_key = f'{api_key[:8]}...' if len(api_key) > 8 else '***'
+        app.logger.debug(f'API key received: {masked_key}')
+        
         # Check if users database is available
+        app.logger.debug(f'Checking users database availability: {users_db_available}')
         if not users_db_available:
-            app.logger.warning(f'Users database unavailable - falling back to config check')
-            if api_key not in app.config['API_KEYS']:
-                app.logger.warning(f'Invalid API key attempt from {request.remote_addr}')
+            app.logger.warning(f'Users database unavailable - falling back to config check for key {masked_key}')
+            app.logger.debug(f'Number of API keys in config: {len(app.config.get("API_KEYS", []))}')
+            
+            if api_key not in app.config.get('API_KEYS', []):
+                app.logger.warning(f'Invalid API key attempt from {request.remote_addr} (key: {masked_key})')
+                log_security_event('INVALID_API_KEY_CONFIG', f'Invalid key {masked_key} from {request.remote_addr}')
                 return jsonify({'error': 'Invalid API key'}), 401
+            
+            app.logger.info(f'Valid API key from config for {request.remote_addr} (key: {masked_key})')
             return f(*args, **kwargs)
         
         try:
+            app.logger.debug('Attempting to get users database connection')
             users_db = get_users_db()
+            app.logger.debug(f'Users database connection obtained: {type(users_db)}')
             
             # Check if API key exists in database
+            app.logger.debug(f'Querying database for API key {masked_key} (DB type: {USERS_DB_TYPE})')
+            
             if USERS_DB_TYPE == 'postgresql':
-                result = users_db.run(
-                    'SELECT api_key, is_banned FROM users WHERE api_key = :api_key',
-                    api_key=api_key
-                )
-                user = result[0] if result else None
+                app.logger.debug('Executing PostgreSQL query for API key lookup')
+                try:
+                    result = users_db.run(
+                        'SELECT api_key, is_banned FROM users WHERE api_key = :api_key',
+                        api_key=api_key
+                    )
+                    user = result[0] if result else None
+                    app.logger.debug(f'PostgreSQL query result: {"user found" if user else "no user found"}')
+                except Exception as pg_err:
+                    app.logger.error(f'PostgreSQL query error: {str(pg_err)}', exc_info=True)
+                    raise
             else:
-                cursor = users_db.cursor()
-                cursor.execute(
-                    'SELECT api_key, is_banned FROM users WHERE api_key = ?',
-                    (api_key,)
-                )
-                user = cursor.fetchone()
+                app.logger.debug('Executing SQLite query for API key lookup')
+                try:
+                    cursor = users_db.cursor()
+                    cursor.execute(
+                        'SELECT api_key, is_banned FROM users WHERE api_key = ?',
+                        (api_key,)
+                    )
+                    user = cursor.fetchone()
+                    app.logger.debug(f'SQLite query result: {"user found" if user else "no user found"}')
+                except Exception as sqlite_err:
+                    app.logger.error(f'SQLite query error: {str(sqlite_err)}', exc_info=True)
+                    raise
             
             if user:
+                app.logger.debug(f'User record found for key {masked_key}')
+                
                 # Check if user is banned
                 is_banned = user[1] if isinstance(user, (tuple, list)) else user['is_banned']
+                app.logger.debug(f'User banned status: {is_banned}')
                 
                 if is_banned:
-                    app.logger.warning(f'Banned API key attempt from {request.remote_addr}')
+                    app.logger.warning(f'Banned API key attempt from {request.remote_addr} (key: {masked_key})')
+                    log_security_event('BANNED_API_KEY_ATTEMPT', f'Banned key {masked_key} used from {request.remote_addr}')
                     return jsonify({'error': 'API key has been banned'}), 403
                 
                 # Valid API key, not banned - allow access
-                app.logger.info(f'Valid API key access from {request.remote_addr}')
+                app.logger.info(f'Valid API key access from {request.remote_addr} to {request.endpoint} (key: {masked_key})')
+                log_security_event('API_KEY_SUCCESS', f'Valid key {masked_key} from {request.remote_addr}')
                 return f(*args, **kwargs)
             else:
                 # API key doesn't exist - add it to the database
-                app.logger.info(f'New API key detected from {request.remote_addr}, adding to database')
+                app.logger.info(f'New API key detected from {request.remote_addr} (key: {masked_key}), adding to database')
                 
-                if USERS_DB_TYPE == 'postgresql':
-                    users_db.run(
-                        '''INSERT INTO users (api_key, is_banned, created_at, last_used_at) 
-                           VALUES (:api_key, :is_banned, :created_at, :last_used_at)''',
-                        api_key=api_key,
-                        is_banned=False,
-                        created_at=datetime.utcnow(),
-                        last_used_at=datetime.utcnow()
-                    )
-                else:
-                    cursor = users_db.cursor()
-                    cursor.execute(
-                        '''INSERT INTO users (api_key, is_banned, created_at, last_used_at) 
-                           VALUES (?, ?, ?, ?)''',
-                        (api_key, False, datetime.utcnow().isoformat(), datetime.utcnow().isoformat())
-                    )
-                    users_db.commit()
-                
-                app.logger.info(f'Successfully added new API key to database')
-                return f(*args, **kwargs)
+                try:
+                    current_time = datetime.utcnow()
+                    app.logger.debug(f'Current UTC time for new user: {current_time.isoformat()}')
+                    
+                    if USERS_DB_TYPE == 'postgresql':
+                        app.logger.debug('Inserting new user into PostgreSQL')
+                        users_db.run(
+                            '''INSERT INTO users (api_key, is_banned, created_at, last_used_at) 
+                               VALUES (:api_key, :is_banned, :created_at, :last_used_at)''',
+                            api_key=api_key,
+                            is_banned=False,
+                            created_at=current_time,
+                            last_used_at=current_time
+                        )
+                        app.logger.debug('PostgreSQL insert completed')
+                    else:
+                        app.logger.debug('Inserting new user into SQLite')
+                        cursor = users_db.cursor()
+                        cursor.execute(
+                            '''INSERT INTO users (api_key, is_banned, created_at, last_used_at) 
+                               VALUES (?, ?, ?, ?)''',
+                            (api_key, False, current_time.isoformat(), current_time.isoformat())
+                        )
+                        users_db.commit()
+                        app.logger.debug(f'SQLite insert completed, rows affected: {cursor.rowcount}')
+                    
+                    app.logger.info(f'Successfully added new API key to database (key: {masked_key})')
+                    log_security_event('NEW_API_KEY_ADDED', f'New key {masked_key} added from {request.remote_addr}')
+                    return f(*args, **kwargs)
+                    
+                except Exception as insert_err:
+                    app.logger.error(f'Error inserting new API key into database: {str(insert_err)}', exc_info=True)
+                    app.logger.error(f'Insert error type: {type(insert_err).__name__}')
+                    log_security_event('API_KEY_INSERT_ERROR', f'Failed to add key {masked_key}: {str(insert_err)}')
+                    return jsonify({'error': 'Failed to register API key'}), 500
                 
         except Exception as e:
             app.logger.error(f'Error checking API key in database: {str(e)}', exc_info=True)
-            log_security_event('API_KEY_CHECK_ERROR', f'Database error: {str(e)}')
+            app.logger.error(f'Exception type: {type(e).__name__}')
+            app.logger.error(f'Endpoint: {request.endpoint}, Remote addr: {request.remote_addr}')
+            log_security_event('API_KEY_CHECK_ERROR', f'Database error for {masked_key}: {str(e)}')
             return jsonify({'error': 'Internal server error during authentication'}), 500
-        
-        return f(*args, **kwargs)
+    
     return decorated_function
 
 # Input Validation
