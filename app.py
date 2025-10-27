@@ -63,9 +63,72 @@ def require_api_key(f):
             app.logger.warning(f'API request without key from {request.remote_addr}')
             return jsonify({'error': 'API key required'}), 401
         
-        if api_key not in app.config['API_KEYS']:
-            app.logger.warning(f'Invalid API key attempt from {request.remote_addr}')
-            return jsonify({'error': 'Invalid API key'}), 401
+        # Check if users database is available
+        if not users_db_available:
+            app.logger.warning(f'Users database unavailable - falling back to config check')
+            if api_key not in app.config['API_KEYS']:
+                app.logger.warning(f'Invalid API key attempt from {request.remote_addr}')
+                return jsonify({'error': 'Invalid API key'}), 401
+            return f(*args, **kwargs)
+        
+        try:
+            users_db = get_users_db()
+            
+            # Check if API key exists in database
+            if USERS_DB_TYPE == 'postgresql':
+                result = users_db.run(
+                    'SELECT api_key, is_banned FROM users WHERE api_key = :api_key',
+                    api_key=api_key
+                )
+                user = result[0] if result else None
+            else:
+                cursor = users_db.cursor()
+                cursor.execute(
+                    'SELECT api_key, is_banned FROM users WHERE api_key = ?',
+                    (api_key,)
+                )
+                user = cursor.fetchone()
+            
+            if user:
+                # Check if user is banned
+                is_banned = user[1] if isinstance(user, (tuple, list)) else user['is_banned']
+                
+                if is_banned:
+                    app.logger.warning(f'Banned API key attempt from {request.remote_addr}')
+                    return jsonify({'error': 'API key has been banned'}), 403
+                
+                # Valid API key, not banned - allow access
+                app.logger.info(f'Valid API key access from {request.remote_addr}')
+                return f(*args, **kwargs)
+            else:
+                # API key doesn't exist - add it to the database
+                app.logger.info(f'New API key detected from {request.remote_addr}, adding to database')
+                
+                if USERS_DB_TYPE == 'postgresql':
+                    users_db.run(
+                        '''INSERT INTO users (api_key, is_banned, created_at, last_used_at) 
+                           VALUES (:api_key, :is_banned, :created_at, :last_used_at)''',
+                        api_key=api_key,
+                        is_banned=False,
+                        created_at=datetime.utcnow(),
+                        last_used_at=datetime.utcnow()
+                    )
+                else:
+                    cursor = users_db.cursor()
+                    cursor.execute(
+                        '''INSERT INTO users (api_key, is_banned, created_at, last_used_at) 
+                           VALUES (?, ?, ?, ?)''',
+                        (api_key, False, datetime.utcnow().isoformat(), datetime.utcnow().isoformat())
+                    )
+                    users_db.commit()
+                
+                app.logger.info(f'Successfully added new API key to database')
+                return f(*args, **kwargs)
+                
+        except Exception as e:
+            app.logger.error(f'Error checking API key in database: {str(e)}', exc_info=True)
+            log_security_event('API_KEY_CHECK_ERROR', f'Database error: {str(e)}')
+            return jsonify({'error': 'Internal server error during authentication'}), 500
         
         return f(*args, **kwargs)
     return decorated_function
