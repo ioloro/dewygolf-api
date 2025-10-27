@@ -456,8 +456,8 @@ def get_users_db():
                 app.logger.info('Users PostgreSQL connection established successfully')
                 app.logger.debug(f'Connection stored in g._users_database: {type(users_db)}')
                 
-                # Verify users table exists
-                app.logger.debug('Checking if users table exists in PostgreSQL')
+                # Verify users table exists - THIS IS CRITICAL
+                app.logger.debug('Verifying users table exists in PostgreSQL')
                 try:
                     table_check = users_db.run(
                         """SELECT EXISTS (
@@ -470,7 +470,9 @@ def get_users_db():
                     app.logger.debug(f'Users table exists: {table_exists}')
                     
                     if not table_exists:
-                        app.logger.warning('Users table does not exist! Listing all available tables...')
+                        app.logger.error('CRITICAL ERROR: Users table does not exist in PostgreSQL database!')
+                        app.logger.error('Listing all available tables for debugging...')
+                        
                         all_tables = users_db.run(
                             """SELECT table_name 
                                FROM information_schema.tables 
@@ -478,15 +480,27 @@ def get_users_db():
                                ORDER BY table_name"""
                         )
                         table_names = [row[0] for row in all_tables] if all_tables else []
-                        app.logger.warning(f'Available tables in database: {table_names}')
-                        app.logger.warning(f'Total tables found: {len(table_names)}')
+                        app.logger.error(f'Available tables in database: {table_names}')
+                        app.logger.error(f'Total tables found: {len(table_names)}')
                         
                         if not table_names:
-                            app.logger.error('No tables found in database! Database may be empty.')
-                        else:
-                            app.logger.info(f'Tables present: {", ".join(table_names)}')
+                            app.logger.error('Database is completely empty - no tables found!')
+                        
+                        # FAIL HARD - raise exception
+                        raise RuntimeError(
+                            f'Users table does not exist in database. '
+                            f'Expected table "users" but found: {table_names}. '
+                            f'Please run database migrations or create the table.'
+                        )
+                    
+                    app.logger.info('Users table verified successfully in PostgreSQL')
+                    
+                except RuntimeError:
+                    # Re-raise our custom error
+                    raise
                 except Exception as table_check_err:
                     app.logger.error(f'Error checking for users table: {str(table_check_err)}', exc_info=True)
+                    raise RuntimeError(f'Failed to verify users table: {str(table_check_err)}')
                 
             except ImportError as import_err:
                 app.logger.error(f'pg8000 import failed: {str(import_err)}')
@@ -496,7 +510,8 @@ def get_users_db():
             except Exception as e:
                 app.logger.error(f'Failed to connect to Users PostgreSQL: {str(e)}', exc_info=True)
                 app.logger.error(f'Exception type: {type(e).__name__}')
-                app.logger.debug(f'Connection parameters that failed: host={host}, port={port}, database={database}, user={username}')
+                if 'host' in locals():
+                    app.logger.debug(f'Connection parameters that failed: host={host}, port={port}, database={database}, user={username}')
                 raise
         else:
             app.logger.info(f'Using SQLite for users database: {USERS_DATABASE}')
@@ -512,8 +527,8 @@ def get_users_db():
                 app.logger.info('Users SQLite connection established')
                 app.logger.debug(f'SQLite database file: {USERS_DATABASE}')
                 
-                # Verify users table exists
-                app.logger.debug('Checking if users table exists in SQLite')
+                # Verify users table exists - THIS IS CRITICAL
+                app.logger.debug('Verifying users table exists in SQLite')
                 try:
                     cursor = users_db.cursor()
                     cursor.execute(
@@ -523,21 +538,35 @@ def get_users_db():
                     app.logger.debug(f'Users table exists: {table_exists}')
                     
                     if not table_exists:
-                        app.logger.warning('Users table does not exist! Listing all available tables...')
+                        app.logger.error('CRITICAL ERROR: Users table does not exist in SQLite database!')
+                        app.logger.error('Listing all available tables for debugging...')
+                        
                         cursor.execute(
                             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
                         )
                         all_tables = cursor.fetchall()
                         table_names = [row[0] for row in all_tables] if all_tables else []
-                        app.logger.warning(f'Available tables in database: {table_names}')
-                        app.logger.warning(f'Total tables found: {len(table_names)}')
+                        app.logger.error(f'Available tables in database: {table_names}')
+                        app.logger.error(f'Total tables found: {len(table_names)}')
                         
                         if not table_names:
-                            app.logger.error('No tables found in database! Database may be empty.')
-                        else:
-                            app.logger.info(f'Tables present: {", ".join(table_names)}')
+                            app.logger.error('Database is completely empty - no tables found!')
+                        
+                        # FAIL HARD - raise exception
+                        raise RuntimeError(
+                            f'Users table does not exist in database. '
+                            f'Expected table "users" but found: {table_names}. '
+                            f'Please run database migrations or create the table.'
+                        )
+                    
+                    app.logger.info('Users table verified successfully in SQLite')
+                    
+                except RuntimeError:
+                    # Re-raise our custom error
+                    raise
                 except Exception as table_check_err:
                     app.logger.error(f'Error checking for users table: {str(table_check_err)}', exc_info=True)
+                    raise RuntimeError(f'Failed to verify users table: {str(table_check_err)}')
                 
             except sqlite3.Error as sqlite_err:
                 app.logger.error(f'SQLite connection error: {str(sqlite_err)}', exc_info=True)
