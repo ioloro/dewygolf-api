@@ -331,13 +331,24 @@ def get_db():
 
 def get_users_db():
     """Get users database connection for the current request."""
+    app.logger.debug('get_users_db() called - checking for existing connection')
+    
     users_db = getattr(g, '_users_database', None)
+    
     if users_db is None:
+        app.logger.info('No existing users database connection found in request context - creating new connection')
+        app.logger.debug(f'Database type configured: {USERS_DB_TYPE}')
+        
         if USERS_DB_TYPE == 'postgresql':
+            app.logger.info('Initiating PostgreSQL connection for users database')
+            
             try:
+                app.logger.debug('Attempting to import pg8000.native')
                 import pg8000.native
+                app.logger.debug('pg8000.native imported successfully')
                 
                 # Parse the PostgreSQL URL
+                app.logger.debug(f'Parsing PostgreSQL URL: {USERS_DATABASE[:20]}...[REDACTED]')
                 parsed = urlparse(USERS_DATABASE)
                 
                 # Extract connection parameters
@@ -347,43 +358,85 @@ def get_users_db():
                 port = parsed.port or 5432
                 database = parsed.path.lstrip('/')
                 
+                app.logger.debug(f'Extracted connection parameters: username={username}, host={host}, port={port}, database={database}')
+                
                 # Parse query parameters for SSL settings
                 query_params = parse_qs(parsed.query)
                 ssl_mode = query_params.get('sslmode', ['prefer'])[0]
                 
+                app.logger.debug(f'Parsed query parameters: {list(query_params.keys())}')
                 app.logger.info(f'Connecting to Users PostgreSQL: host={host}, port={port}, database={database}, user={username}, sslmode={ssl_mode}')
                 
                 # Create connection with SSL if required
                 if ssl_mode == 'require':
-                    users_db = g._users_database = pg8000.native.Connection(
-                        user=username,
-                        password=password,
-                        host=host,
-                        port=port,
-                        database=database,
-                        ssl_context=True
-                    )
+                    app.logger.debug('SSL mode is "require" - creating connection with SSL context')
+                    try:
+                        users_db = g._users_database = pg8000.native.Connection(
+                            user=username,
+                            password=password,
+                            host=host,
+                            port=port,
+                            database=database,
+                            ssl_context=True
+                        )
+                        app.logger.debug('PostgreSQL connection object created with SSL')
+                    except Exception as ssl_error:
+                        app.logger.error(f'Failed to create SSL connection: {str(ssl_error)}', exc_info=True)
+                        raise
                 else:
-                    users_db = g._users_database = pg8000.native.Connection(
-                        user=username,
-                        password=password,
-                        host=host,
-                        port=port,
-                        database=database
-                    )
+                    app.logger.debug(f'SSL mode is "{ssl_mode}" - creating connection without explicit SSL context')
+                    try:
+                        users_db = g._users_database = pg8000.native.Connection(
+                            user=username,
+                            password=password,
+                            host=host,
+                            port=port,
+                            database=database
+                        )
+                        app.logger.debug('PostgreSQL connection object created without SSL')
+                    except Exception as conn_error:
+                        app.logger.error(f'Failed to create connection: {str(conn_error)}', exc_info=True)
+                        raise
                 
                 app.logger.info('Users PostgreSQL connection established successfully')
+                app.logger.debug(f'Connection stored in g._users_database: {type(users_db)}')
                 
-            except ImportError:
+            except ImportError as import_err:
+                app.logger.error(f'pg8000 import failed: {str(import_err)}')
                 app.logger.error('pg8000 not installed. Install with: pip install pg8000')
+                app.logger.debug('Import error details:', exc_info=True)
                 raise
             except Exception as e:
                 app.logger.error(f'Failed to connect to Users PostgreSQL: {str(e)}', exc_info=True)
+                app.logger.error(f'Exception type: {type(e).__name__}')
+                app.logger.debug(f'Connection parameters that failed: host={host}, port={port}, database={database}, user={username}')
                 raise
         else:
-            users_db = g._users_database = sqlite3.connect(USERS_DATABASE)
-            users_db.row_factory = sqlite3.Row
-            app.logger.debug('Users SQLite connection established')
+            app.logger.info(f'Using SQLite for users database: {USERS_DATABASE}')
+            app.logger.debug('Attempting to connect to SQLite database')
+            
+            try:
+                users_db = g._users_database = sqlite3.connect(USERS_DATABASE)
+                app.logger.debug(f'SQLite connection created: {type(users_db)}')
+                
+                users_db.row_factory = sqlite3.Row
+                app.logger.debug('SQLite row_factory set to sqlite3.Row')
+                
+                app.logger.info('Users SQLite connection established')
+                app.logger.debug(f'SQLite database file: {USERS_DATABASE}')
+                
+            except sqlite3.Error as sqlite_err:
+                app.logger.error(f'SQLite connection error: {str(sqlite_err)}', exc_info=True)
+                app.logger.error(f'Database path: {USERS_DATABASE}')
+                raise
+            except Exception as e:
+                app.logger.error(f'Unexpected error connecting to SQLite: {str(e)}', exc_info=True)
+                raise
+    else:
+        app.logger.debug('Reusing existing users database connection from request context')
+        app.logger.debug(f'Connection type: {type(users_db)}')
+    
+    app.logger.debug('get_users_db() returning connection')
     return users_db
 
 @app.teardown_appcontext
