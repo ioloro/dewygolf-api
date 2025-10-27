@@ -420,7 +420,7 @@ def get_users_db():
                 ssl_mode = query_params.get('sslmode', ['prefer'])[0]
                 
                 app.logger.debug(f'Parsed query parameters: {list(query_params.keys())}')
-                app.logger.info(f'Connecting to Users PostgreSQL: host={host}, port={port}, database={database}, user={username}, sslmode={ssl_mode}')
+                app.logger.info(f'Connecting to PostgreSQL database "{database}": host={host}, port={port}, user={username}, sslmode={ssl_mode}')
                 
                 # Create connection with SSL if required
                 if ssl_mode == 'require':
@@ -453,54 +453,50 @@ def get_users_db():
                         app.logger.error(f'Failed to create connection: {str(conn_error)}', exc_info=True)
                         raise
                 
-                app.logger.info('Users PostgreSQL connection established successfully')
+                app.logger.info(f'PostgreSQL connection to database "{database}" established successfully')
                 app.logger.debug(f'Connection stored in g._users_database: {type(users_db)}')
                 
-                # Verify users table exists - THIS IS CRITICAL
-                app.logger.debug('Verifying users table exists in PostgreSQL')
+                # Verify required tables exist - THIS IS CRITICAL
+                app.logger.debug(f'Verifying required tables exist in database "{database}"')
                 try:
-                    table_check = users_db.run(
-                        """SELECT EXISTS (
-                            SELECT FROM information_schema.tables 
-                            WHERE table_schema = 'public' 
-                            AND table_name = 'users'
-                        )"""
+                    # Get all tables in the database
+                    all_tables_result = users_db.run(
+                        """SELECT table_name 
+                           FROM information_schema.tables 
+                           WHERE table_schema = 'public' 
+                           ORDER BY table_name"""
                     )
-                    table_exists = table_check[0][0] if table_check else False
-                    app.logger.debug(f'Users table exists: {table_exists}')
+                    table_names = [row[0] for row in all_tables_result] if all_tables_result else []
+                    app.logger.info(f'Tables found in database "{database}": {table_names}')
+                    app.logger.debug(f'Total tables found: {len(table_names)}')
                     
-                    if not table_exists:
-                        app.logger.error('CRITICAL ERROR: Users table does not exist in PostgreSQL database!')
-                        app.logger.error('Listing all available tables for debugging...')
-                        
-                        all_tables = users_db.run(
-                            """SELECT table_name 
-                               FROM information_schema.tables 
-                               WHERE table_schema = 'public' 
-                               ORDER BY table_name"""
-                        )
-                        table_names = [row[0] for row in all_tables] if all_tables else []
-                        app.logger.error(f'Available tables in database: {table_names}')
-                        app.logger.error(f'Total tables found: {len(table_names)}')
+                    # Check for required tables
+                    required_tables = ['users', 'golfCourses']
+                    missing_tables = [table for table in required_tables if table not in table_names]
+                    
+                    if missing_tables:
+                        app.logger.error(f'CRITICAL ERROR: Required tables missing from database "{database}": {missing_tables}')
+                        app.logger.error(f'Expected tables: {required_tables}')
+                        app.logger.error(f'Found tables: {table_names}')
                         
                         if not table_names:
                             app.logger.error('Database is completely empty - no tables found!')
                         
                         # FAIL HARD - raise exception
                         raise RuntimeError(
-                            f'Users table does not exist in database. '
-                            f'Expected table "users" but found: {table_names}. '
-                            f'Please run database migrations or create the table.'
+                            f'Required tables missing from database "{database}": {missing_tables}. '
+                            f'Expected: {required_tables}, Found: {table_names}. '
+                            f'Please run database migrations or create the missing tables.'
                         )
                     
-                    app.logger.info('Users table verified successfully in PostgreSQL')
+                    app.logger.info(f'All required tables verified in database "{database}": {required_tables}')
                     
                 except RuntimeError:
                     # Re-raise our custom error
                     raise
                 except Exception as table_check_err:
-                    app.logger.error(f'Error checking for users table: {str(table_check_err)}', exc_info=True)
-                    raise RuntimeError(f'Failed to verify users table: {str(table_check_err)}')
+                    app.logger.error(f'Error checking for required tables: {str(table_check_err)}', exc_info=True)
+                    raise RuntimeError(f'Failed to verify required tables: {str(table_check_err)}')
                 
             except ImportError as import_err:
                 app.logger.error(f'pg8000 import failed: {str(import_err)}')
@@ -508,13 +504,13 @@ def get_users_db():
                 app.logger.debug('Import error details:', exc_info=True)
                 raise
             except Exception as e:
-                app.logger.error(f'Failed to connect to Users PostgreSQL: {str(e)}', exc_info=True)
+                app.logger.error(f'Failed to connect to PostgreSQL: {str(e)}', exc_info=True)
                 app.logger.error(f'Exception type: {type(e).__name__}')
                 if 'host' in locals():
                     app.logger.debug(f'Connection parameters that failed: host={host}, port={port}, database={database}, user={username}')
                 raise
         else:
-            app.logger.info(f'Using SQLite for users database: {USERS_DATABASE}')
+            app.logger.info(f'Using SQLite database: {USERS_DATABASE}')
             app.logger.debug('Attempting to connect to SQLite database')
             
             try:
@@ -524,49 +520,50 @@ def get_users_db():
                 users_db.row_factory = sqlite3.Row
                 app.logger.debug('SQLite row_factory set to sqlite3.Row')
                 
-                app.logger.info('Users SQLite connection established')
+                app.logger.info('SQLite connection established')
                 app.logger.debug(f'SQLite database file: {USERS_DATABASE}')
                 
-                # Verify users table exists - THIS IS CRITICAL
-                app.logger.debug('Verifying users table exists in SQLite')
+                # Verify required tables exist - THIS IS CRITICAL
+                app.logger.debug('Verifying required tables exist in SQLite database')
                 try:
                     cursor = users_db.cursor()
-                    cursor.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table' AND name='users'"
-                    )
-                    table_exists = cursor.fetchone() is not None
-                    app.logger.debug(f'Users table exists: {table_exists}')
                     
-                    if not table_exists:
-                        app.logger.error('CRITICAL ERROR: Users table does not exist in SQLite database!')
-                        app.logger.error('Listing all available tables for debugging...')
-                        
-                        cursor.execute(
-                            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-                        )
-                        all_tables = cursor.fetchall()
-                        table_names = [row[0] for row in all_tables] if all_tables else []
-                        app.logger.error(f'Available tables in database: {table_names}')
-                        app.logger.error(f'Total tables found: {len(table_names)}')
+                    # Get all tables in the database
+                    cursor.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                    )
+                    all_tables = cursor.fetchall()
+                    table_names = [row[0] for row in all_tables] if all_tables else []
+                    app.logger.info(f'Tables found in database: {table_names}')
+                    app.logger.debug(f'Total tables found: {len(table_names)}')
+                    
+                    # Check for required tables
+                    required_tables = ['users', 'golfCourses']
+                    missing_tables = [table for table in required_tables if table not in table_names]
+                    
+                    if missing_tables:
+                        app.logger.error(f'CRITICAL ERROR: Required tables missing from database: {missing_tables}')
+                        app.logger.error(f'Expected tables: {required_tables}')
+                        app.logger.error(f'Found tables: {table_names}')
                         
                         if not table_names:
                             app.logger.error('Database is completely empty - no tables found!')
                         
                         # FAIL HARD - raise exception
                         raise RuntimeError(
-                            f'Users table does not exist in database. '
-                            f'Expected table "users" but found: {table_names}. '
-                            f'Please run database migrations or create the table.'
+                            f'Required tables missing from database: {missing_tables}. '
+                            f'Expected: {required_tables}, Found: {table_names}. '
+                            f'Please run database migrations or create the missing tables.'
                         )
                     
-                    app.logger.info('Users table verified successfully in SQLite')
+                    app.logger.info(f'All required tables verified in database: {required_tables}')
                     
                 except RuntimeError:
                     # Re-raise our custom error
                     raise
                 except Exception as table_check_err:
-                    app.logger.error(f'Error checking for users table: {str(table_check_err)}', exc_info=True)
-                    raise RuntimeError(f'Failed to verify users table: {str(table_check_err)}')
+                    app.logger.error(f'Error checking for required tables: {str(table_check_err)}', exc_info=True)
+                    raise RuntimeError(f'Failed to verify required tables: {str(table_check_err)}')
                 
             except sqlite3.Error as sqlite_err:
                 app.logger.error(f'SQLite connection error: {str(sqlite_err)}', exc_info=True)
@@ -576,7 +573,7 @@ def get_users_db():
                 app.logger.error(f'Unexpected error connecting to SQLite: {str(e)}', exc_info=True)
                 raise
     else:
-        app.logger.debug('Reusing existing users database connection from request context')
+        app.logger.debug('Reusing existing database connection from request context')
         app.logger.debug(f'Connection type: {type(users_db)}')
     
     app.logger.debug('get_users_db() returning connection')
