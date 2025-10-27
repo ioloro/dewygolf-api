@@ -312,7 +312,8 @@ def get_db():
 def get_users_db():
     """Get users database connection for the current request."""
     app.logger.debug('get_users_db() called - checking for existing connection')
-    
+    app.logger.debug('get_users_db() called - attempting to get {getattr(g}')
+
     users_db = getattr(g, '_users_database', None)
     
     if users_db is None:
@@ -888,15 +889,6 @@ def health_check():
                 health_status['databases']['golf_courses'] = 'error'
                 health_status['golf_courses_error'] = str(e)
         
-        # Test users database if available
-        if users_db_available:
-            try:
-                users_db = get_users_db()
-                result = users_db.run('SELECT 1')
-            except Exception as e:
-                health_status['databases']['users'] = 'error'
-                health_status['users_error'] = str(e)
-        
         # Determine overall status
         if not golf_courses_db_available:
             health_status['status'] = 'unhealthy'
@@ -951,23 +943,6 @@ if test_golf_courses_db_connection():
         app.logger.info('Golf courses database connected (table creation required)')
 else:
     app.logger.error('Golf courses database connection failed - API will not function properly')
-
-# Test users database connection
-if test_users_db_connection():
-    users_db_available = True
-    try:
-        # Try to get count if table exists
-        users_db = get_users_db()
-
-        result = users_db.run('SELECT COUNT(*) FROM users')
-        user_count = result[0][0]
-
-        app.logger.info(f'Users database ready - Total users: {user_count}')
-    except Exception as e:
-        app.logger.warning(f'Users database connected but table may not exist: {str(e)}')
-        app.logger.info('Users database connected (table creation required)')
-else:
-    app.logger.error('Users database connection failed - User features will not be available')
 
 # Log overall status
 if golf_courses_db_available and users_db_available:
