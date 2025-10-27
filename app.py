@@ -1,4 +1,7 @@
-from flask import Flask, request, jsonify, g, redirect
+from flask import Flask, request, jsonify, g, redirect, abort
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from flask_cors import CORS
 import sqlite3
 import math
 import os
@@ -6,8 +9,126 @@ import logging
 from logging.handlers import RotatingFileHandler
 import sys
 from urllib.parse import urlparse, parse_qs
+import re
+import hashlib
+import secrets
+from datetime import datetime, timedelta
+from functools import wraps
+from dotenv import load_dotenv
+import hmac
+import base64
+
+# Load environment variables
+load_dotenv()
 
 app = Flask(__name__)
+
+# Security Configuration
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(32))
+app.config['API_KEYS'] = os.environ.get('API_KEYS', '').split(',') if os.environ.get('API_KEYS') else []
+app.config['RATE_LIMIT_ENABLED'] = os.environ.get('RATE_LIMIT_ENABLED', 'true').lower() == 'true'
+app.config['CORS_ORIGINS'] = os.environ.get('CORS_ORIGINS', '').split(',') if os.environ.get('CORS_ORIGINS') else ['*']
+
+# Initialize Rate Limiter
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["1000 per hour", "100 per minute"] if app.config['RATE_LIMIT_ENABLED'] else []
+)
+
+# Initialize CORS
+cors = CORS(app, origins=app.config['CORS_ORIGINS'])
+
+# Security Headers
+@app.after_request
+def add_security_headers(response):
+    """Add security headers to all responses."""
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Content-Security-Policy'] = "default-src 'self'"
+    response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
+    return response
+
+# API Key Authentication
+def require_api_key(f):
+    """Decorator to require API key authentication."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
+        
+        if not api_key:
+            app.logger.warning(f'API request without key from {request.remote_addr}')
+            return jsonify({'error': 'API key required'}), 401
+        
+        if api_key not in app.config['API_KEYS']:
+            app.logger.warning(f'Invalid API key attempt from {request.remote_addr}')
+            return jsonify({'error': 'Invalid API key'}), 401
+        
+        return f(*args, **kwargs)
+    return decorated_function
+
+# Input Validation
+def validate_coordinates(lat, lng):
+    """Validate latitude and longitude values."""
+    try:
+        lat = float(lat)
+        lng = float(lng)
+        
+        if not (-90 <= lat <= 90):
+            raise ValueError('Latitude must be between -90 and 90')
+        if not (-180 <= lng <= 180):
+            raise ValueError('Longitude must be between -180 and 180')
+        
+        return lat, lng
+    except (ValueError, TypeError) as e:
+        raise ValueError(f'Invalid coordinates: {str(e)}')
+
+def sanitize_input(text):
+    """Sanitize user input to prevent injection attacks."""
+    if not isinstance(text, str):
+        return text
+    
+    # Remove potentially dangerous characters
+    text = re.sub(r'[<>"\'&]', '', text)
+    # Limit length
+    text = text[:100]
+    return text.strip()
+
+def validate_search_params(data):
+    """Validate and sanitize search parameters."""
+    validated = {}
+    
+    # Validate limit
+    limit = data.get('limit', 10)
+    try:
+        limit = int(limit)
+        if limit < 1 or limit > 100:
+            limit = 10
+    except (ValueError, TypeError):
+        limit = 10
+    validated['limit'] = limit
+    
+    # Validate and sanitize text inputs
+    for field in ['city', 'zipcode', 'name']:
+        if field in data:
+            validated[field] = sanitize_input(data[field])
+    
+    # Validate coordinates
+    if 'lat' in data and 'lng' in data:
+        try:
+            validated['lat'], validated['lng'] = validate_coordinates(data['lat'], data['lng'])
+        except ValueError as e:
+            raise ValueError(str(e))
+    
+    return validated
+
+# Enhanced Logging
+def log_security_event(event_type, details):
+    """Log security-related events."""
+    app.logger.warning(f'SECURITY_EVENT: {event_type} - {details} - IP: {request.remote_addr} - User-Agent: {request.headers.get("User-Agent", "Unknown")}')
 
 # Configure logging
 def setup_logging():
@@ -275,10 +396,14 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     return R * c
 
 @app.route("/")
+@limiter.limit("10 per minute")
 def root_route():
+    """Root route with rate limiting."""
     return redirect("https://www.dewygolf.com", code=302)
 
 @app.route("/search", methods=['GET', 'POST'])
+@limiter.limit("60 per minute")
+@require_api_key
 def search_courses():
     """
     Search for golf courses by various criteria:
@@ -287,11 +412,14 @@ def search_courses():
     - zipcode: Search by zipcode
     - name: Search by course name
     - limit: Number of results to return (default: 10)
+    
+    Requires API key authentication.
     """
     request_id = request.headers.get('X-Request-ID', 'N/A')
     client_ip = request.remote_addr
+    api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
     
-    app.logger.info(f'Search request received - Method: {request.method}, IP: {client_ip}, Request-ID: {request_id}')
+    app.logger.info(f'Search request received - Method: {request.method}, IP: {client_ip}, Request-ID: {request_id}, API-Key: {api_key[:8]}...')
     
     try:
         # Get parameters from query string or JSON body
@@ -302,12 +430,22 @@ def search_courses():
             data = request.args.to_dict()
             app.logger.info(f'GET request with query params: {data}')
         
-        lat = data.get('lat')
-        lng = data.get('lng')
-        city = data.get('city')
-        zipcode = data.get('zipcode')
-        name = data.get('name')
-        limit = int(data.get('limit', 10))
+        # Validate and sanitize input parameters
+        try:
+            validated_data = validate_search_params(data)
+        except ValueError as e:
+            log_security_event('INVALID_INPUT', f'Validation failed: {str(e)}')
+            return jsonify({
+                'success': False,
+                'error': str(e)
+            }), 400
+        
+        lat = validated_data.get('lat')
+        lng = validated_data.get('lng')
+        city = validated_data.get('city')
+        zipcode = validated_data.get('zipcode')
+        name = validated_data.get('name')
+        limit = validated_data.get('limit')
         
         app.logger.info(f'Search parameters - lat: {lat}, lng: {lng}, city: {city}, zipcode: {zipcode}, name: {name}, limit: {limit}')
         
@@ -316,9 +454,6 @@ def search_courses():
         # Search by latitude/longitude (nearest courses)
         if lat and lng:
             try:
-                lat = float(lat)
-                lng = float(lng)
-                
                 app.logger.info(f'Performing location-based search at coordinates: ({lat}, {lng})')
                 
                 # Get all courses and calculate distances
@@ -360,11 +495,12 @@ def search_courses():
                     'total_found': len(results)
                 })
                 
-            except ValueError as ve:
-                app.logger.error(f'Invalid coordinate values - lat: {lat}, lng: {lng}, error: {str(ve)}')
+            except Exception as e:
+                log_security_event('COORDINATE_ERROR', f'Error processing coordinates: {str(e)}')
+                app.logger.error(f'Error in location search: {str(e)}')
                 return jsonify({
                     'success': False,
-                    'error': 'Invalid latitude or longitude values'
+                    'error': 'Error processing location search'
                 }), 400
         
         # Search by city name
@@ -464,6 +600,7 @@ def search_courses():
             })
         
         else:
+            log_security_event('MISSING_PARAMS', f'Search request missing required parameters - Provided data: {data}')
             app.logger.warning(f'Search request missing required parameters - Provided data: {data}')
             return jsonify({
                 'success': False,
@@ -471,11 +608,60 @@ def search_courses():
             }), 400
             
     except Exception as e:
+        log_security_event('SEARCH_ERROR', f'Unexpected error in search endpoint: {str(e)}')
         app.logger.error(f'Unexpected error in search endpoint: {str(e)}', exc_info=True)
         return jsonify({
             'success': False,
+            'error': 'Internal server error'
+        }), 500
+
+@app.route("/health")
+@limiter.limit("30 per minute")
+def health_check():
+    """Health check endpoint for monitoring."""
+    try:
+        # Test database connection
+        db = get_db()
+        if DB_TYPE == 'postgresql':
+            result = db.run('SELECT 1')
+        else:
+            cursor = db.cursor()
+            cursor.execute('SELECT 1')
+            result = cursor.fetchone()
+        
+        return jsonify({
+            'status': 'healthy',
+            'timestamp': datetime.utcnow().isoformat(),
+            'database': 'connected'
+        })
+    except Exception as e:
+        app.logger.error(f'Health check failed: {str(e)}')
+        return jsonify({
+            'status': 'unhealthy',
+            'timestamp': datetime.utcnow().isoformat(),
             'error': str(e)
         }), 500
+
+@app.route("/api-info")
+@limiter.limit("10 per minute")
+def api_info():
+    """API information endpoint."""
+    return jsonify({
+        'name': 'Dewy Golf Course API',
+        'version': '1.0.0',
+        'description': 'Golf course search API with location-based and text search capabilities',
+        'authentication': 'API key required',
+        'rate_limits': {
+            'search': '60 requests per minute',
+            'health': '30 requests per minute',
+            'root': '10 requests per minute'
+        },
+        'endpoints': {
+            'search': '/search - Search golf courses',
+            'health': '/health - Health check',
+            'api_info': '/api-info - This information'
+        }
+    })
 
 # Initialize database on startup
 if init_db():

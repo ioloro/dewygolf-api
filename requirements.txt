@@ -1,9 +1,13 @@
 click==8.1.7
 Flask==3.0.3
 Flask-SQLAlchemy==3.1.1
+Flask-Limiter==3.8.0
+Flask-CORS==5.0.0
 gunicorn==23.0.0
 itsdangerous==2.2.0
 Jinja2==3.1.4
 MarkupSafe==2.1.5
 Werkzeug==3.0.4
 pg8000==1.31.2
+python-dotenv==1.0.1
+cryptography==43.0.3
