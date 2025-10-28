@@ -614,61 +614,84 @@ def root_route():
 @require_api_key
 @limiter.limit("5 per minute")
 def search():
-    """Search for golf courses with enhanced security."""
+    """Search for golf courses with enhanced security and input validation."""
     try:
-        # Get request data
+        # ---- Extract request data ----
         if request.method == 'POST':
-            data = request.get_json() or {}
+            data = request.get_json(silent=True) or {}
         else:
             data = request.args.to_dict()
-        
-        app.logger.info(f'Search request received with data: {data}')
-        
-        # Validate and sanitize input
+
+        safe_data = {k: v for k, v in data.items() if k.lower() != 'api_key'}
+        app.logger.info(f"Search request received: {safe_data}")
+
+        # ---- Validate input ----
         try:
-            validated_data = validate_search_params(data)
+            validated = validate_search_params(data)
         except ValueError as e:
             log_security_event('VALIDATION_ERROR', str(e))
             return jsonify({'success': False, 'error': str(e)}), 400
-        
+
         db = get_db()
-        
-        lat = validated_data.get('lat')
-        lng = validated_data.get('lng')
-        city = validated_data.get('city')
-        zipcode = validated_data.get('zipcode')
-        name = validated_data.get('name')
-        limit = validated_data.get('limit', 10)
-        
-        # Location-based search
+        cursor = db.cursor()
+
+        lat = validated.get('lat')
+        lng = validated.get('lng')
+        city = validated.get('city')
+        zipcode = validated.get('zipcode')
+        name = validated.get('name')
+        limit = int(validated.get('limit', 10))
+
+        # ---- Ensure only one search type is active ----
+        provided = sum([
+            bool(lat is not None and lng is not None),
+            bool(city),
+            bool(zipcode),
+            bool(name)
+        ])
+        if provided != 1:
+            return jsonify({
+                'success': False,
+                'error': 'Please provide exactly one search type: lat/lng, city, zipcode, or name'
+            }), 400
+
+        # ===============================================================
+        # 1. Location-based search
+        # ===============================================================
         if lat is not None and lng is not None:
-            app.logger.info(f'Performing location-based search at ({lat}, {lng})')
-            
-            cursor = db.cursor()
-            cursor.execute('SELECT * FROM golfcourse')
-            all_courses = cursor.fetchall()
-            
-            # Calculate distances
+            app.logger.info(f"Performing location-based search near ({lat}, {lng})")
+
+            # Pre-filter within ~0.5° bounding box (improves performance)
+            lat_min, lat_max = lat - 0.5, lat + 0.5
+            lng_min, lng_max = lng - 0.5, lng + 0.5
+
+            cursor.execute(
+                '''
+                SELECT * FROM golfcourse
+                WHERE latitude BETWEEN %s AND %s
+                  AND longitude BETWEEN %s AND %s
+                ''',
+                (lat_min, lat_max, lng_min, lng_max)
+            )
+            nearby_courses = cursor.fetchall()
+
             courses_with_distance = []
-            for course in all_courses:
-                course_lat = get_row_value(course, 2)  # latitude is index 2
-                course_lng = get_row_value(course, 3)  # longitude is index 3
-                
-                if course_lat and course_lng:
-                    try:
-                        distance = calculate_distance(lat, lng, float(course_lat), float(course_lng))
-                        course_dict = course_to_dict(course)
-                        course_dict['distance'] = round(distance, 2)
-                        courses_with_distance.append(course_dict)
-                    except (ValueError, TypeError):
-                        continue
-            
-            # Sort by distance and limit
+            for course in nearby_courses:
+                try:
+                    course_lat = float(get_row_value(course, 2))
+                    course_lng = float(get_row_value(course, 3))
+                    distance = calculate_distance(lat, lng, course_lat, course_lng)
+                    course_dict = course_to_dict(course)
+                    course_dict['distance'] = round(distance, 2)
+                    courses_with_distance.append(course_dict)
+                except (ValueError, TypeError):
+                    continue
+
             courses_with_distance.sort(key=lambda x: x['distance'])
             results = courses_with_distance[:limit]
-            
-            app.logger.info(f'Location search completed - Found {len(results)} courses')
-            
+
+            app.logger.info(f"Location search complete — {len(results)} courses found")
+
             return jsonify({
                 'success': True,
                 'search_type': 'location',
@@ -676,20 +699,24 @@ def search():
                 'results': results,
                 'total_found': len(results)
             })
-        
-        # City-based search
-        elif city:
-            app.logger.info(f'Performing city-based search for: {city}')
-            
-            cursor = db.cursor()
+
+        # ===============================================================
+        # 2. City-based search
+        # ===============================================================
+        if city:
+            app.logger.info(f"Performing city-based search for: {city}")
             cursor.execute(
-                'SELECT * FROM golfcourse WHERE LOWER(address) LIKE LOWER(%s) LIMIT %s',
+                '''
+                SELECT * FROM golfcourse
+                WHERE LOWER(address) LIKE LOWER(%s)
+                LIMIT %s
+                ''',
                 (f'%{city}%', limit)
             )
             results = cursor.fetchall()
 
-            app.logger.info(f'City search completed - Found {len(results)} courses')
-            
+            app.logger.info(f"City search complete — {len(results)} courses found")
+
             return jsonify({
                 'success': True,
                 'search_type': 'city',
@@ -697,21 +724,24 @@ def search():
                 'results': [course_to_dict(row) for row in results],
                 'total_found': len(results)
             })
-        
-        # Zipcode-based search
-        elif zipcode:
-            app.logger.info(f'Performing zipcode-based search for: {zipcode}')
-            
-            # cursor = db.cursor()
-            cursor = get_db()
+
+        # ===============================================================
+        # 3. Zipcode-based search
+        # ===============================================================
+        if zipcode:
+            app.logger.info(f"Performing zipcode-based search for: {zipcode}")
             cursor.execute(
-                'SELECT * FROM golfcourse WHERE address LIKE %s LIMIT %s',
+                '''
+                SELECT * FROM golfcourse
+                WHERE address LIKE %s
+                LIMIT %s
+                ''',
                 (f'%{zipcode}%', limit)
             )
             results = cursor.fetchall()
-            
-            app.logger.info(f'Zipcode search completed - Found {len(results)} courses')
-            
+
+            app.logger.info(f"Zipcode search complete — {len(results)} courses found")
+
             return jsonify({
                 'success': True,
                 'search_type': 'zipcode',
@@ -719,20 +749,24 @@ def search():
                 'results': [course_to_dict(row) for row in results],
                 'total_found': len(results)
             })
-        
-        # Name-based search
-        elif name:
-            app.logger.info(f'Performing name-based search for: {name}')
-            
-            cursor = db.cursor()
+
+        # ===============================================================
+        # 4. Name-based search
+        # ===============================================================
+        if name:
+            app.logger.info(f"Performing name-based search for: {name}")
             cursor.execute(
-                'SELECT * FROM golfcourse WHERE LOWER(name) LIKE LOWER(%s) LIMIT %s',
+                '''
+                SELECT * FROM golfcourse
+                WHERE LOWER(name) LIKE LOWER(%s)
+                LIMIT %s
+                ''',
                 (f'%{name}%', limit)
             )
             results = cursor.fetchall()
-            
-            app.logger.info(f'Name search completed - Found {len(results)} courses')
-            
+
+            app.logger.info(f"Name search complete — {len(results)} courses found")
+
             return jsonify({
                 'success': True,
                 'search_type': 'name',
@@ -740,21 +774,18 @@ def search():
                 'results': [course_to_dict(row) for row in results],
                 'total_found': len(results)
             })
-        
-        else:
-            log_security_event('MISSING_PARAMS', f'Search request missing required parameters')
-            return jsonify({
-                'success': False,
-                'error': 'Please provide one of: lat/lng, city, zipcode, or name'
-            }), 400
-            
+
     except Exception as e:
         log_security_event('SEARCH_ERROR', f'Unexpected error: {str(e)}')
-        app.logger.error(f'Unexpected error in search endpoint: {str(e)}', exc_info=True)
-        return jsonify({
-            'success': False,
-            'error': 'Internal server error'
-        }), 500
+        app.logger.error(f"Unexpected error in search(): {str(e)}", exc_info=True)
+        return jsonify({'success': False, 'error': 'Internal server error'}), 500
+
+    finally:
+        try:
+            cursor.close()
+            db.close()
+        except Exception:
+            pass
 
 # ============================================================================
 # DB CONNECTIONS
@@ -849,7 +880,7 @@ def get_db():
     if '_database' not in g:
         try:
             import pg8000.native
-            
+
             # Parse the PostgreSQL URL
             parsed = urlparse(DATABASE)
             
