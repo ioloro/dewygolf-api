@@ -1181,12 +1181,14 @@ init_db()
 def get_db():
     """Get database connection for the current request."""
     db = getattr(g, '_database', None)
+    app.logger.debug('Attempted to read db {db}')
     if db is None:
         try:
             import pg8000.native
             
             # Parse the PostgreSQL URL
             parsed = urlparse(DATABASE)
+            app.logger.debug('parsed {parsed}')
             
             # Extract connection parameters
             username = parsed.username
