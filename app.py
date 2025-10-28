@@ -846,12 +846,8 @@ def get_db():
     Returns:
         pg8000 Connection object
     """
-    db = getattr(g, '_database', None)
-    
-    if db is None:
+    if '_database' not in g:
         try:
-            import pg8000.native
-            
             # Parse the PostgreSQL URL
             parsed = urlparse(DATABASE)
             
@@ -866,26 +862,26 @@ def get_db():
             query_params = parse_qs(parsed.query)
             ssl_mode = query_params.get('sslmode', ['prefer'])[0]
             
-            app.logger.info(f'Connecting to PostgreSQL: host={host}, port={port}, database={database}, user={username}, sslmode={ssl_mode}')
+            app.logger.info(
+                f'Connecting to PostgreSQL: host={host}, port={port}, '
+                f'database={database}, user={username}, sslmode={ssl_mode}'
+            )
             
-            # Create connection with SSL if required
+            # Connection parameters
+            conn_params = {
+                'user': username,
+                'password': password,
+                'host': host,
+                'port': port,
+                'database': database,
+                'timeout': 30  # Add connection timeout
+            }
+            
+            # Add SSL if required
             if ssl_mode == 'require':
-                db = g._database = pg8000.native.Connection(
-                    user=username,
-                    password=password,
-                    host=host,
-                    port=port,
-                    database=database,
-                    ssl_context=True
-                )
-            else:
-                db = g._database = pg8000.native.Connection(
-                    user=username,
-                    password=password,
-                    host=host,
-                    port=port,
-                    database=database
-                )
+                conn_params['ssl_context'] = True
+            
+            g._database = pg8000.native.Connection(**conn_params)
             
             app.logger.info('PostgreSQL connection established successfully')
             
@@ -896,7 +892,7 @@ def get_db():
             app.logger.error(f'Failed to connect to PostgreSQL: {str(e)}', exc_info=True)
             raise
     
-    return db
+    return g._database
 
 
 @app.teardown_appcontext
