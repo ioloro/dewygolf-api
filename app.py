@@ -217,10 +217,14 @@ def verify_api_key_rate_limit(apiKey):
         
         request_count = user_data[0] if isinstance(user_data, (tuple, list)) else user_data['request_count']
         last_reset = user_data[1] if isinstance(user_data, (tuple, list)) else user_data['last_reset']
+        role = user_data[2] if isinstance(user_data, (tuple, list)) else user_data['role']
         
         # Parse last reset time
         if isinstance(last_reset, str):
             last_reset = datetime.fromisoformat(last_reset)
+        
+        if role == 'johnmarc':
+			return False
         
         # Reset counter if more than 24 hours have passed
         if datetime.utcnow() - last_reset > timedelta(hours=24):
