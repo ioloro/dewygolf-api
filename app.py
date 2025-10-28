@@ -673,7 +673,7 @@ def search():
             lat_min, lat_max = lat - 0.5, lat + 0.5
             lng_min, lng_max = lng - 0.5, lng + 0.5
 
-            cursor.execute(
+            rows = db.run(
                 '''
                 SELECT * FROM golfcourse
                 WHERE latitude BETWEEN %s AND %s
@@ -713,7 +713,7 @@ def search():
         # ===============================================================
         if city:
             app.logger.info(f"Performing city-based search for: {city}")
-            cursor.execute(
+            rows = db.run(
                 '''
                 SELECT * FROM golfcourse
                 WHERE LOWER(address) LIKE LOWER(%s)
@@ -721,7 +721,7 @@ def search():
                 ''',
                 (f'%{city}%', limit)
             )
-            results = cursor.fetchall()
+            results = [course_to_dict(r) for r in rows]
 
             app.logger.info(f"City search complete — {len(results)} courses found")
 
@@ -729,7 +729,7 @@ def search():
                 'success': True,
                 'search_type': 'city',
                 'search_term': city,
-                'results': [course_to_dict(row) for row in results],
+                'results': results,
                 'total_found': len(results)
             })
 
@@ -739,7 +739,7 @@ def search():
         if zipcode:
             app.logger.info(f"Performing zipcode-based search for: {zipcode}")
             app.logger.warning(f"get_db() returned: {type(db)} with attributes: {dir(db)}; cursor is a {type(cursor)}")
-            cursor.execute(
+            rows = db.run(
                 '''
                 SELECT * FROM golfcourse
                 WHERE address LIKE %s
@@ -747,7 +747,7 @@ def search():
                 ''',
                 (f'%{zipcode}%', limit)
             )
-            results = cursor.fetchall()
+            results = [course_to_dict(r) for r in rows]
 
             app.logger.info(f"Zipcode search complete — {len(results)} courses found")
 
@@ -755,7 +755,7 @@ def search():
                 'success': True,
                 'search_type': 'zipcode',
                 'search_term': zipcode,
-                'results': [course_to_dict(row) for row in results],
+                'results': results,
                 'total_found': len(results)
             })
 
@@ -764,7 +764,7 @@ def search():
         # ===============================================================
         if name:
             app.logger.info(f"Performing name-based search for: {name}")
-            cursor.execute(
+            rows = db.run(
                 '''
                 SELECT * FROM golfcourse
                 WHERE LOWER(name) LIKE LOWER(%s)
@@ -772,7 +772,7 @@ def search():
                 ''',
                 (f'%{name}%', limit)
             )
-            results = cursor.fetchall()
+            results = [course_to_dict(r) for r in rows]
 
             app.logger.info(f"Name search complete — {len(results)} courses found")
 
@@ -780,7 +780,7 @@ def search():
                 'success': True,
                 'search_type': 'name',
                 'search_term': name,
-                'results': [course_to_dict(row) for row in results],
+                'results': results,
                 'total_found': len(results)
             })
 
@@ -791,7 +791,6 @@ def search():
 
     finally:
         try:
-            cursor.close()
             db.close()
         except Exception:
             pass
