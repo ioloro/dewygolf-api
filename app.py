@@ -1,13 +1,43 @@
 from flask import Flask, request, jsonify, g, redirect
-import sqlite3
-import math
-import os
+from flask_limiter import Limiter
 import logging
 from logging.handlers import RotatingFileHandler
+import math
+import os
+import sqlite3
 import sys
 from urllib.parse import urlparse, parse_qs
 
+# ============================================================================
+# APP CONFIGURATION AND ENVIRONMENT VARIABLES
+# ============================================================================
+
 app = Flask(__name__)
+
+DATABASE_URL = os.environ.get('DATABASE_URL')
+RATE_LIMIT_ENABLED = os.environ.get('RATE_LIMIT_ENABLED', 'true').lower() == 'true'
+SSL_PINNING_ENABLED = os.environ.get('SSL_PINNING_ENABLED', 'true').lower() == 'true'
+EXPECTED_SSL_FINGERPRINTS = os.environ.get('EXPECTED_SSL_FINGERPRINTS', '').split(',') if os.environ.get('EXPECTED_SSL_FINGERPRINTS') else []
+MAX_REQUESTS_PER_API_KEY = int(os.environ.get('MAX_REQUESTS_PER_API_KEY', 1000))
+HONEYPOT_ENABLED = os.environ.get('HONEYPOT_ENABLED', 'true').lower() == 'true'
+
+app.logger.info(f'DATABASE_URL: {DATABASE_URL}; RATE_LIMIT_ENABLED {RATE_LIMIT_ENABLED}; SSL_PINNING_ENABLED {SSL_PINNING_ENABLED}; EXPECTED_SSL_FINGERPRINTS {EXPECTED_SSL_FINGERPRINTS}; MAX_REQUESTS_PER_API_KEY {MAX_REQUESTS_PER_API_KEY}; HONEYPOT_ENABLED {HONEYPOT_ENABLED}')
+DATABASE = DATABASE_URL
+
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["60 per hour", "10 per minute"] if app.config['RATE_LIMIT_ENABLED'] else [],
+    storage_uri=os.environ.get('RATE_LIMIT_STORAGE_URI', 'memory://'),
+    strategy='fixed-window'
+)
+
+# ============================================================================
+# SSL PINNING AND CERTIFICATE VERIFICATION
+# ============================================================================
+
+
+
 
 # Configure logging
 def setup_logging():
@@ -44,10 +74,6 @@ def setup_logging():
 setup_logging()
 
 # Database configuration
-DATABASE_URL = os.environ.get('DATABASE_URL')
-app.logger.info(f'DATABASE_URL: {DATABASE_URL}')
-DATABASE = DATABASE_URL
-app.logger.info('Using PostgreSQL database with pg8000')
 
 
 def get_db():
