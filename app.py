@@ -497,7 +497,7 @@ def check_security():
 @app.route("appsettings.json")
 @app.route("config.php")
 @app.route("wp-config.php")
-@app.route("app.js")
+@app.route("/app.js")
 @app.route("/admin")
 @app.route("/config")
 @app.route("/backup")
