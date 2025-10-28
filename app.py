@@ -26,7 +26,7 @@ import certifi
 
 app = Flask(__name__)
 
-CORS_ORIGINS = app.config['CORS_ORIGINS']
+CORS_ORIGINS = os.environ.get('CORS_ORIGINS')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 EXPECTED_SSL_FINGERPRINTS = os.environ.get('EXPECTED_SSL_FINGERPRINTS', '').split(',') if os.environ.get('EXPECTED_SSL_FINGERPRINTS') else []
 HONEYPOT_ENABLED = os.environ.get('HONEYPOT_ENABLED', 'true').lower() == 'true'
