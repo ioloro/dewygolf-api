@@ -157,6 +157,27 @@ def init_db():
                 uuid TEXT DEFAULT 'constant'
             )
         ''')
+
+        conn.run('''
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                uuid TEXT NOT NULL DEFAULT '',
+                "displayName" TEXT NOT NULL DEFAULT '',
+                "firstConnectionDate" TEXT NOT NULL DEFAULT '',
+                "isActive" BOOLEAN NOT NULL DEFAULT true,
+                "passwordResetRequired" BOOLEAN NOT NULL DEFAULT false,
+                banned BOOLEAN NOT NULL DEFAULT false,
+                "lastActivityDate" TEXT,
+                email TEXT,
+                "bannedDate" TEXT,
+                "bannedBy" TEXT,
+                "banReason" TEXT,
+                role TEXT,
+                "dewyPremium" BOOLEAN NOT NULL DEFAULT false,
+                "dewyPremiumExpiration" TEXT,
+                "singleGameCount" INTEGER
+            )
+        ''')
         
         conn.close()
         app.logger.info('PostgreSQL database tables created successfully')
@@ -385,6 +406,67 @@ def search_courses():
             'error': str(e)
         }), 500
 
+@app.route("/authenticate", methods=['GET', 'POST'])
+def authenticate():
+    """
+    Recieve user information or create a new user
+    """
+    request_id = request.headers.get('X-Request-ID', 'N/A')
+    client_ip = request.remote_addr
+    
+    app.logger.info(f'Authenticate request received - Method: {request.method}, IP: {client_ip}, Request-ID: {request_id}')
+    
+    try:
+        # Get parameters from query string or JSON body
+        if request.method == 'POST':
+            data = request.get_json() or {}
+            app.logger.info(f'POST request with JSON body: {data}')
+        else:
+            data = request.args.to_dict()
+            app.logger.info(f'GET request with query params: {data}')
+
+        apiKey = data.get('apiKey')
+        
+        app.logger.info(f'apiKey parameters - apiKey {apiKey}')
+        
+        db = get_db()
+
+        if apiKey:
+            app.logger.info(f'Performing apiKey search for: {apiKey}')
+            
+            results = db.run(
+                'SELECT * FROM users WHERE uuid ILIKE :pattern LIMIT :limit',
+                pattern=f'%{apiKey}%',
+                limit=limit
+            )
+            
+            app.logger.info(f'apiKey search completed - Found {len(results)} users matching "{apiKey}"')
+            if results:
+                sample_names = [get_row_value(row, 1) for row in results[:3]]
+                app.logger.info(f'Sample results: {sample_names}')
+            
+            return jsonify({
+                'success': True,
+                'search_type': 'apiKey',
+                'search_term': apiKey,
+                'results': [course_to_dict(row) for row in results],
+                'total_found': len(results)
+            })
+        
+        else:
+            app.logger.warning(f'Authenticate request missing required parameters - Provided data: {data}')
+            return jsonify({
+                'success': False,
+                'error': 'Please provide an apiKey'
+            }), 400
+            
+    except Exception as e:
+        app.logger.error(f'Unexpected error in search endpoint: {str(e)}', exc_info=True)
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 # Initialize database on startup
 if init_db():
     try:
@@ -421,7 +503,7 @@ if init_db():
         course_count = result[0][0]
         conn.close()
         app.logger.info(f'PostgreSQL connection successful - Total courses in database: {course_count}')
-        
+
     except Exception as e:
         app.logger.error(f'Database connection test failed: {str(e)}', exc_info=True)
 
