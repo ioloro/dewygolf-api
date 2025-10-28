@@ -426,6 +426,7 @@ def authenticate():
             app.logger.info(f'GET request with query params: {data}')
 
         apiKey = data.get('apiKey')
+        limit = int(data.get('limit', 1))
         
         app.logger.info(f'apiKey parameters - apiKey {apiKey}')
         
