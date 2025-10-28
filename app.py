@@ -122,8 +122,23 @@ def add_security_headers(response):
 
 
 # ============================================================================
-# LOGGING CONFIGURATION
+# ENHANCED LOGGING
 # ============================================================================
+
+def log_security_event(event_type, details):
+    """Log security-related events with enhanced details."""
+    log_entry = {
+        'timestamp': datetime.utcnow().isoformat(),
+        'event_type': event_type,
+        'details': details,
+        'ip': request.remote_addr,
+        'user_agent': request.headers.get('User-Agent', 'Unknown'),
+        'path': request.path,
+        'method': request.method,
+        'api_key_hash': hash_api_key(g.api_key)[:16] if hasattr(g, 'api_key') else None
+    }
+    
+    app.logger.warning(f'SECURITY_EVENT: {log_entry}')
 
 # Configure logging
 def setup_logging():
@@ -146,18 +161,427 @@ def setup_logging():
     # Set up console handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(logging.Formatter(
-        '%(asctime)s %(levelname)s: %(message)s'
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     ))
     console_handler.setLevel(logging.INFO)
+    
+    # Security events handler (separate file)
+    security_handler = RotatingFileHandler(
+        'logs/security.log',
+        maxBytes=10240000,
+        backupCount=10
+    )
+    security_handler.setFormatter(logging.Formatter(
+        '%(asctime)s SECURITY: %(message)s'
+    ))
+    security_handler.setLevel(logging.WARNING)
     
     # Configure app logger
     app.logger.addHandler(file_handler)
     app.logger.addHandler(console_handler)
+    app.logger.addHandler(security_handler)
     app.logger.setLevel(logging.INFO)
     
-    app.logger.info('Golf Course API startup')
+    app.logger.info('Logging configured successfully')
 
+# Initialize logging
 setup_logging()
+
+
+# ============================================================================
+# API KEY VERIFICATION AND USER MANAGEMENT
+# ============================================================================
+
+def generate_api_key():
+    """Generate a secure random API key."""
+    return secrets.token_urlsafe(32)
+
+def hash_api_key(api_key):
+    """Hash API key for secure storage comparison."""
+    return hashlib.sha256(api_key.encode()).hexdigest()
+
+def verify_api_key_rate_limit(apiKey):
+    """Check if API key has exceeded its rate limit."""
+    try:
+        users_db = get_users_db()
+        
+        result = users_db.run(
+            'SELECT request_count, last_reset FROM users WHERE apiKey = :apiKey',
+            apiKey=apiKey
+        )
+        user_data = result[0] if result else None
+        
+        if not user_data:
+            return True
+        
+        request_count = user_data[0] if isinstance(user_data, (tuple, list)) else user_data['request_count']
+        last_reset = user_data[1] if isinstance(user_data, (tuple, list)) else user_data['last_reset']
+        
+        # Parse last reset time
+        if isinstance(last_reset, str):
+            last_reset = datetime.fromisoformat(last_reset)
+        
+        # Reset counter if more than 24 hours have passed
+        if datetime.utcnow() - last_reset > timedelta(hours=24):
+            users_db.run(
+                'UPDATE users SET request_count = 0, last_reset = :now WHERE apiKey = :apiKey',
+                now=datetime.utcnow(),
+                apiKey=apiKey
+            )
+            return True
+        
+        # Check if limit exceeded
+        if request_count >= app.config['MAX_REQUESTS_PER_API_KEY']:
+            return False
+        
+        return True
+    except Exception as e:
+        app.logger.error(f'Error checking API key rate limit: {str(e)}')
+        return True  # Fail open on error
+
+def increment_api_key_usage(apiKey):
+    """Increment the request count for an API key."""
+    try:
+        users_db = get_users_db()
+
+        users_db.run(
+            '''UPDATE users 
+               SET request_count = request_count + 1, 
+                   last_used_at = :now 
+               WHERE apiKey = :apiKey''',
+            now=datetime.utcnow(),
+            apiKey=apiKey
+        )
+    except Exception as e:
+        app.logger.error(f'Error incrementing API key usage: {str(e)}')
+
+def require_api_key(f):
+    """Enhanced decorator to require API key authentication with comprehensive checks."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # SSL Pinning Check
+        if not verify_ssl_pinning():
+            log_security_event('SSL_PINNING_VIOLATION', 'Request failed SSL pinning check')
+            return jsonify({'error': 'SSL verification failed'}), 403
+        
+        # Extract API key
+        api_key = request.headers.get('X-API-Key') or request.args.get('apiKey')
+        
+        if not apiKey:
+            log_security_event('MISSING_API_KEY', 'Request without API key')
+            return jsonify({'error': 'API key required', 'hint': 'Include X-API-Key header or api_key parameter'}), 401
+        
+        # Validate API key format
+        if not re.match(r'^[A-Za-z0-9_-]{32,}$', apiKey):
+            log_security_event('INVALID_API_KEY_FORMAT', f'Malformed API key from {request.remote_addr}')
+            return jsonify({'error': 'Invalid API key format'}), 401
+        
+        # Check if users database is available
+        if not users_db_available:
+            app.logger.warning('Users database unavailable - falling back to config check')
+            if apiKey not in app.config['API_KEYS']:
+                log_security_event('INVALID_API_KEY', f'Invalid API key attempt from {request.remote_addr}')
+                return jsonify({'error': 'Invalid API key'}), 401
+            return f(*args, **kwargs)
+        
+        try:
+            users_db = get_users_db()
+            
+            # Check if API key exists in database
+            result = users_db.run(
+                'SELECT apiKey, is_banned, is_active, request_count FROM users WHERE apiKey = :apiKey',
+                api_key=api_key
+            )
+            user = result[0] if result else None
+
+            if user:
+                # Extract user data
+                is_banned = user[1] if isinstance(user, (tuple, list)) else user['is_banned']
+                is_active = user[2] if isinstance(user, (tuple, list)) else user['is_active']
+                
+                # Check if user is banned
+                if is_banned:
+                    log_security_event('BANNED_API_KEY', f'Banned API key attempt from {request.remote_addr}')
+                    return jsonify({'error': 'API key has been banned', 'reason': 'Terms of service violation'}), 403
+                
+                # Check if user is active
+                if not is_active:
+                    log_security_event('INACTIVE_API_KEY', f'Inactive API key attempt from {request.remote_addr}')
+                    return jsonify({'error': 'API key is inactive', 'hint': 'Contact support to reactivate'}), 403
+                
+                # Check per-key rate limit
+                if not verify_api_key_rate_limit(apiKey):
+                    log_security_event('API_KEY_RATE_LIMIT', f'API key {apiKey[:8]}... exceeded rate limit')
+                    return jsonify({
+                        'error': 'API key rate limit exceeded',
+                        'limit': app.config['MAX_REQUESTS_PER_API_KEY'],
+                        'reset_in': '24 hours'
+                    }), 429
+                
+                # Increment usage counter
+                increment_api_key_usage(apiKey)
+                
+                # Store API key in g for use in endpoint
+                g.apiKey = apiKey
+                
+                app.logger.info(f'Valid API key access from {request.remote_addr}')
+                return f(*args, **kwargs)
+            else:
+                # API key doesn't exist - create new user
+                app.logger.info(f'New API key detected from {request.remote_addr}, creating user account')
+                
+                users_db.run(
+                    '''INSERT INTO users (apiKey, is_banned, is_active, created_at, last_used_at, request_count, last_reset) 
+                       VALUES (:apiKey, :is_banned, :is_active, :created_at, :last_used_at, :request_count, :last_reset)''',
+                    apiKey=apiKey,
+                    is_banned=False,
+                    is_active=True,
+                    created_at=datetime.utcnow(),
+                    last_used_at=datetime.utcnow(),
+                    request_count=1,
+                    last_reset=datetime.utcnow()
+                )
+
+                # Store API key in g
+                g.apiKey = apiKey
+                
+                app.logger.info('Successfully created new user account')
+                return f(*args, **kwargs)
+                
+        except Exception as e:
+            app.logger.error(f'Error checking API key in database: {str(e)}', exc_info=True)
+            log_security_event('API_KEY_CHECK_ERROR', f'Database error: {str(e)}')
+            return jsonify({'error': 'Internal server error during authentication'}), 500
+        
+    return decorated_function
+
+
+# ============================================================================
+# INPUT VALIDATION
+# ============================================================================
+
+def validate_coordinates(lat, lng):
+    """Validate latitude and longitude values."""
+    try:
+        lat = float(lat)
+        lng = float(lng)
+        
+        if not (-90 <= lat <= 90):
+            raise ValueError('Latitude must be between -90 and 90')
+        if not (-180 <= lng <= 180):
+            raise ValueError('Longitude must be between -180 and 180')
+        
+        return lat, lng
+    except (ValueError, TypeError) as e:
+        raise ValueError(f'Invalid coordinates: {str(e)}')
+
+def sanitize_input(text):
+    """Sanitize user input to prevent injection attacks."""
+    if not isinstance(text, str):
+        return text
+    
+    # Remove potentially dangerous characters
+    text = re.sub(r'[<>"\'&;]', '', text)
+    # Remove SQL keywords (case insensitive)
+    sql_keywords = ['DROP', 'DELETE', 'INSERT', 'UPDATE', 'EXEC', 'UNION', 'SELECT']
+    for keyword in sql_keywords:
+        text = re.sub(rf'\b{keyword}\b', '', text, flags=re.IGNORECASE)
+    # Limit length
+    text = text[:100]
+    return text.strip()
+
+def validate_search_params(data):
+    """Validate and sanitize search parameters."""
+    validated = {}
+    
+    # Validate limit
+    limit = data.get('limit', 10)
+    try:
+        limit = int(limit)
+        if limit < 1 or limit > 100:
+            limit = 10
+    except (ValueError, TypeError):
+        limit = 10
+    validated['limit'] = limit
+    
+    # Validate and sanitize text inputs
+    for field in ['city', 'zipcode', 'name']:
+        if field in data:
+            validated[field] = sanitize_input(data[field])
+    
+    # Validate coordinates
+    if 'lat' in data and 'lng' in data:
+        try:
+            validated['lat'], validated['lng'] = validate_coordinates(data['lat'], data['lng'])
+        except ValueError as e:
+            raise ValueError(str(e))
+    
+    return validated
+
+# ============================================================================
+# ANTI-SCRAPING MEASURES
+# ============================================================================
+
+def detect_bot_behavior():
+    """Detect potential bot/scraper behavior."""
+    user_agent = request.headers.get('User-Agent', '').lower()
+    
+    # Common bot indicators
+    bot_indicators = [
+        'bot', 'crawler', 'spider', 'scraper', 'curl', 'wget', 
+        'python-requests', 'http', 'scrapy', 'selenium', 'phantomjs'
+    ]
+    
+    # Check if user agent contains bot indicators
+    if any(indicator in user_agent for indicator in bot_indicators):
+        return True
+    
+    # Check for missing or suspicious user agent
+    if not user_agent or len(user_agent) < 10:
+        return True
+    
+    # Check request frequency (stored in g)
+    if hasattr(g, 'request_count'):
+        if g.request_count > 100:  # More than 100 requests in session
+            return True
+    
+    return False
+
+def check_request_patterns():
+    """Analyze request patterns for suspicious activity."""
+    suspicious = False
+    reasons = []
+    
+    # Check for rapid sequential requests
+    if hasattr(g, 'last_request_time'):
+        time_diff = (datetime.utcnow() - g.last_request_time).total_seconds()
+        if time_diff < 0.5:  # Less than 500ms between requests
+            suspicious = True
+            reasons.append('rapid_requests')
+    
+    # Check for parameter manipulation attempts
+    if request.args:
+        for key, value in request.args.items():
+            # Check for SQL injection attempts
+            if any(keyword in str(value).upper() for keyword in ['UNION', 'SELECT', 'DROP', 'DELETE']):
+                suspicious = True
+                reasons.append('sql_injection_attempt')
+            # Check for XSS attempts
+            if any(char in str(value) for char in ['<', '>', 'script']):
+                suspicious = True
+                reasons.append('xss_attempt')
+    
+    g.last_request_time = datetime.utcnow()
+    
+    return suspicious, reasons
+
+@app.before_request
+def check_security():
+    """Pre-request security checks."""
+    # Bot detection
+    if detect_bot_behavior():
+        log_security_event('BOT_DETECTED', f'Potential bot detected: {request.headers.get("User-Agent")}')
+        # Don't block immediately, but log and monitor
+    
+    # Check request patterns
+    suspicious, reasons = check_request_patterns()
+    if suspicious:
+        log_security_event('SUSPICIOUS_PATTERN', f'Suspicious activity: {", ".join(reasons)}')
+        # Could implement blocking here if needed
+
+# ============================================================================
+# HONEYPOT ENDPOINT (Trap for scrapers)
+# ============================================================================
+
+@app.route("/admin")
+@app.route("/config")
+@app.route("/backup")
+@app.route("/.env")
+@app.route("/database")
+def honeypot():
+    """Honeypot endpoint to catch scrapers."""
+    if app.config['HONEYPOT_ENABLED']:
+        log_security_event('HONEYPOT_TRIGGERED', f'Suspicious access to honeypot endpoint: {request.path}')
+        
+        # Ban the API key if present
+        api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
+        if api_key and users_db_available:
+            try:
+                users_db = get_users_db()
+                if USERS_DB_TYPE == 'postgresql':
+                    users_db.run(
+                        'UPDATE users SET is_banned = :banned WHERE api_key = :api_key',
+                        banned=True,
+                        api_key=api_key
+                    )
+                else:
+                    cursor = users_db.cursor()
+                    cursor.execute(
+                        'UPDATE users SET is_banned = ? WHERE api_key = ?',
+                        (True, api_key)
+                    )
+                    users_db.commit()
+                app.logger.warning(f'API key banned after honeypot trigger: {api_key[:8]}...')
+            except Exception as e:
+                app.logger.error(f'Error banning API key: {str(e)}')
+    
+    abort(404)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # Database configuration
 
