@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, g, redirect
 from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 import logging
 from logging.handlers import RotatingFileHandler
 import math
@@ -18,7 +19,7 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 RATE_LIMIT_ENABLED = os.environ.get('RATE_LIMIT_ENABLED', 'true').lower() == 'true'
 SSL_PINNING_ENABLED = os.environ.get('SSL_PINNING_ENABLED', 'true').lower() == 'true'
 EXPECTED_SSL_FINGERPRINTS = os.environ.get('EXPECTED_SSL_FINGERPRINTS', '').split(',') if os.environ.get('EXPECTED_SSL_FINGERPRINTS') else []
-MAX_REQUESTS_PER_API_KEY = int(os.environ.get('MAX_REQUESTS_PER_API_KEY', 1000))
+MAX_REQUESTS_PER_API_KEY = int(os.environ.get('MAX_REQUESTS_PER_API_KEY', 10))
 HONEYPOT_ENABLED = os.environ.get('HONEYPOT_ENABLED', 'true').lower() == 'true'
 
 app.logger.info(f'DATABASE_URL: {DATABASE_URL}; RATE_LIMIT_ENABLED {RATE_LIMIT_ENABLED}; SSL_PINNING_ENABLED {SSL_PINNING_ENABLED}; EXPECTED_SSL_FINGERPRINTS {EXPECTED_SSL_FINGERPRINTS}; MAX_REQUESTS_PER_API_KEY {MAX_REQUESTS_PER_API_KEY}; HONEYPOT_ENABLED {HONEYPOT_ENABLED}')
