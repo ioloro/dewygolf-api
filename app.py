@@ -224,8 +224,8 @@ def verify_api_key_rate_limit(apiKey):
             last_reset = datetime.fromisoformat(last_reset)
         
         if role == 'johnmarc':
-			return False
-        
+            return False
+            
         # Reset counter if more than 24 hours have passed
         if datetime.utcnow() - last_reset > timedelta(hours=24):
             users_db.run(
