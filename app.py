@@ -1184,6 +1184,7 @@ def get_db(table_name):
     Args:
         table_name: Either "golfcourse" or "users"
     """
+    app.logger.debug('Attempting to get_db {table_name}; g {g}')
     db = getattr(g, '_database', None)
     app.logger.debug(f'Attempted to read db {db}')
     
