@@ -1319,3 +1319,4 @@ app.logger.info(f'- Max Requests per API Key: {MAX_REQUESTS_PER_API_KEY}/24h')
 if __name__ == '__main__':
     app.logger.info('Starting Flask server')
     app.run(debug=True)
+    init_db()
