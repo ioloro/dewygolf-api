@@ -115,51 +115,51 @@ def init_db():
     try:
         import pg8000.native
             
-            parsed = urlparse(DATABASE)
-            username = parsed.username
-            password = parsed.password
-            host = parsed.hostname
-            port = parsed.port or 5432
-            database = parsed.path.lstrip('/')
-            query_params = parse_qs(parsed.query)
-            ssl_mode = query_params.get('sslmode', ['prefer'])[0]
-            
-            app.logger.info('Initializing PostgreSQL database tables')
-            
-            if ssl_mode == 'require':
-                conn = pg8000.native.Connection(
-                    user=username,
-                    password=password,
-                    host=host,
-                    port=port,
-                    database=database,
-                    ssl_context=True
-                )
-            else:
-                conn = pg8000.native.Connection(
-                    user=username,
-                    password=password,
-                    host=host,
-                    port=port,
-                    database=database
-                )
-            
-            conn.run('''
-                CREATE TABLE IF NOT EXISTS golfcourse (
-                    id SERIAL PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    latitude REAL NOT NULL,
-                    longitude REAL NOT NULL,
-                    address TEXT,
-                    website TEXT,
-                    phone TEXT,
-                    timezone TEXT,
-                    uuid TEXT DEFAULT 'constant'
-                )
-            ''')
-            
-            conn.close()
-            app.logger.info('PostgreSQL database tables created successfully')
+        parsed = urlparse(DATABASE)
+        username = parsed.username
+        password = parsed.password
+        host = parsed.hostname
+        port = parsed.port or 5432
+        database = parsed.path.lstrip('/')
+        query_params = parse_qs(parsed.query)
+        ssl_mode = query_params.get('sslmode', ['prefer'])[0]
+        
+        app.logger.info('Initializing PostgreSQL database tables')
+        
+        if ssl_mode == 'require':
+            conn = pg8000.native.Connection(
+                user=username,
+                password=password,
+                host=host,
+                port=port,
+                database=database,
+                ssl_context=True
+            )
+        else:
+            conn = pg8000.native.Connection(
+                user=username,
+                password=password,
+                host=host,
+                port=port,
+                database=database
+            )
+        
+        conn.run('''
+            CREATE TABLE IF NOT EXISTS golfcourse (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                latitude REAL NOT NULL,
+                longitude REAL NOT NULL,
+                address TEXT,
+                website TEXT,
+                phone TEXT,
+                timezone TEXT,
+                uuid TEXT DEFAULT 'constant'
+            )
+        ''')
+        
+        conn.close()
+        app.logger.info('PostgreSQL database tables created successfully')
 
         return True
     except Exception as e:
