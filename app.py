@@ -1265,9 +1265,13 @@ def close_db(error):
 def test_golf_courses_db_connection():
     """Test connection to golf courses database."""
     try:
+        app.logger.debug('Attempting to test test_golf_courses_db_connection')
         db = get_db('golfCourse')
+        app.logger.debug('test_golf_courses_db_connection: db {db}')
         cursor = db.cursor()
+        app.logger.debug('test_golf_courses_db_connection: cursor {cursor}')
         cursor.execute('SELECT 1')
+        app.logger.debug('test_golf_courses_db_connection: cursor execute')
         app.logger.info(f'Golf courses database connection successful')
         return True
     except Exception as e:
