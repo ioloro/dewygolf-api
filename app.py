@@ -204,7 +204,7 @@ def hash_api_key(apiKey):
 def verify_api_key_rate_limit(apiKey):
     """Check if API key has exceeded its rate limit."""
     try:
-        users_db = get_db('users')
+        users_db = get_db()
         
         result = users_db.run(
             'SELECT request_count, last_reset FROM users WHERE apiKey = :apiKey',
@@ -243,7 +243,7 @@ def verify_api_key_rate_limit(apiKey):
 def increment_api_key_usage(apiKey):
     """Increment the request count for an API key."""
     try:
-        users_db = get_db('users')
+        users_db = get_db()
 
         users_db.run(
             '''UPDATE users 
@@ -286,7 +286,7 @@ def require_api_key(f):
         #     return f(*args, **kwargs)
         
         try:
-            users_db = get_db('users')
+            users_db = get_db()
             
             # Check if API key exists in database
             result = users_db.run(
@@ -508,7 +508,7 @@ def honeypot():
         apiKey = request.headers.get('X-API-Key') or request.args.get('apiKey')
         if apiKey and users_db_available:
             try:
-                users_db = get_db('users')
+                users_db = get_db()
                 users_db.run(
                     'UPDATE users SET is_banned = :banned WHERE apiKey = :apiKey',
                     banned=True,
@@ -594,7 +594,7 @@ def search():
             log_security_event('VALIDATION_ERROR', str(e))
             return jsonify({'success': False, 'error': str(e)}), 400
         
-        db = get_db('golfCourse')
+        db = get_db()
         
         lat = validated_data.get('lat')
         lng = validated_data.get('lng')
@@ -740,7 +740,7 @@ def health_check():
         # Test database connections
         if golf_courses_db_available:
             try:
-                db = get_db('golfCourse')
+                db = get_db()
                 cursor = db.cursor()
                 cursor.execute('SELECT 1')
             except Exception as e:
@@ -749,7 +749,7 @@ def health_check():
         
         if users_db_available:
             try:
-                users_db = get_db('users')
+                users_db = get_db()
                 cursor = users_db.cursor()
                 cursor.execute('SELECT 1')
             except Exception as e:
