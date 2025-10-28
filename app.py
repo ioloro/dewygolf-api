@@ -135,7 +135,7 @@ def log_security_event(event_type, details):
         'user_agent': request.headers.get('User-Agent', 'Unknown'),
         'path': request.path,
         'method': request.method,
-        'api_key_hash': hash_api_key(g.api_key)[:16] if hasattr(g, 'api_key') else None
+        'api_key_hash': hash_api_key(g.apiKey)[:16] if hasattr(g, 'apiKey') else None
     }
     
     app.logger.warning(f'SECURITY_EVENT: {log_entry}')
@@ -196,9 +196,9 @@ def generate_api_key():
     """Generate a secure random API key."""
     return secrets.token_urlsafe(32)
 
-def hash_api_key(api_key):
+def hash_api_key(apiKey):
     """Hash API key for secure storage comparison."""
-    return hashlib.sha256(api_key.encode()).hexdigest()
+    return hashlib.sha256(apiKey.encode()).hexdigest()
 
 def verify_api_key_rate_limit(apiKey):
     """Check if API key has exceeded its rate limit."""
@@ -265,11 +265,11 @@ def require_api_key(f):
             return jsonify({'error': 'SSL verification failed'}), 403
         
         # Extract API key
-        api_key = request.headers.get('X-API-Key') or request.args.get('apiKey')
+        apiKey = request.headers.get('X-API-Key') or request.args.get('apiKey')
         
         if not apiKey:
             log_security_event('MISSING_API_KEY', 'Request without API key')
-            return jsonify({'error': 'API key required', 'hint': 'Include X-API-Key header or api_key parameter'}), 401
+            return jsonify({'error': 'API key required', 'hint': 'Include X-API-Key header or apiKey parameter'}), 401
         
         # Validate API key format
         if not re.match(r'^[A-Za-z0-9_-]{32,}$', apiKey):
@@ -290,7 +290,7 @@ def require_api_key(f):
             # Check if API key exists in database
             result = users_db.run(
                 'SELECT apiKey, is_banned, is_active, request_count FROM users WHERE apiKey = :apiKey',
-                api_key=api_key
+                apiKey=apiKey
             )
             user = result[0] if result else None
 
@@ -504,16 +504,16 @@ def honeypot():
         log_security_event('HONEYPOT_TRIGGERED', f'Suspicious access to honeypot endpoint: {request.path}')
         
         # Ban the API key if present
-        api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
-        if api_key and users_db_available:
+        apiKey = request.headers.get('X-API-Key') or request.args.get('apiKey')
+        if apiKey and users_db_available:
             try:
                 users_db = get_db()
                 users_db.run(
-                    'UPDATE users SET is_banned = :banned WHERE api_key = :api_key',
+                    'UPDATE users SET is_banned = :banned WHERE apiKey = :apiKey',
                     banned=True,
-                    api_key=api_key
+                    apiKey=apiKey
                 )
-                app.logger.warning(f'API key banned after honeypot trigger: {api_key[:8]}...')
+                app.logger.warning(f'API key banned after honeypot trigger: {apiKey[:8]}...')
             except Exception as e:
                 app.logger.error(f'Error banning API key: {str(e)}')
     
