@@ -33,6 +33,7 @@ HONEYPOT_ENABLED = os.environ.get('HONEYPOT_ENABLED', 'true').lower() == 'true'
 MAX_REQUESTS_PER_API_KEY = int(os.environ.get('MAX_REQUESTS_PER_API_KEY', 10))
 RATE_LIMIT_ENABLED = os.environ.get('RATE_LIMIT_ENABLED', 'true').lower() == 'true'
 SSL_PINNING_ENABLED = os.environ.get('SSL_PINNING_ENABLED', 'true').lower() == 'true'
+API_KEYS = os.environ.getattr('WHITELISTED_API_KEYS', [])
 
 app.logger.info(f'DATABASE_URL: {DATABASE_URL}; RATE_LIMIT_ENABLED {RATE_LIMIT_ENABLED}; SSL_PINNING_ENABLED {SSL_PINNING_ENABLED}; EXPECTED_SSL_FINGERPRINTS {EXPECTED_SSL_FINGERPRINTS}; MAX_REQUESTS_PER_API_KEY {MAX_REQUESTS_PER_API_KEY}; HONEYPOT_ENABLED {HONEYPOT_ENABLED}')
 DATABASE = DATABASE_URL
@@ -277,12 +278,12 @@ def require_api_key(f):
             return jsonify({'error': 'Invalid API key format'}), 401
         
         # Check if users database is available
-        if not users_db_available:
-            app.logger.warning('Users database unavailable - falling back to config check')
-            if apiKey not in API_KEYS:
-                log_security_event('INVALID_API_KEY', f'Invalid API key attempt from {request.remote_addr}')
-                return jsonify({'error': 'Invalid API key'}), 401
-            return f(*args, **kwargs)
+        # if not users_db_available:
+        #     app.logger.warning('Users database unavailable - falling back to config check')
+        #     if apiKey not in API_KEYS:
+        #         log_security_event('INVALID_API_KEY', f'Invalid API key attempt from {request.remote_addr}')
+        #         return jsonify({'error': 'Invalid API key'}), 401
+        #     return f(*args, **kwargs)
         
         try:
             users_db = get_users_db()
