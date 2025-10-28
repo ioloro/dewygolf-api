@@ -848,6 +848,8 @@ def get_db():
     """
     if '_database' not in g:
         try:
+            import pg8000.native
+            
             # Parse the PostgreSQL URL
             parsed = urlparse(DATABASE)
             
