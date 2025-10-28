@@ -270,7 +270,7 @@ def require_api_key(f):
         
         if not apiKey:
             log_security_event('MISSING_API_KEY', 'Request without API key')
-            return jsonify({'error': 'API key required', 'hint': 'Include X-API-Key header or apiKey parameter'}), 401
+            return jsonify({'error': 'API key required', 'hint': ''}), 401
         
         # Validate API key format
         if not re.match(r'^[A-Za-z0-9_-]{32,}$', apiKey):
@@ -490,17 +490,27 @@ def check_security():
 # ============================================================================
 
 @app.route("/.env")
+@app.route("/.env.bak")
 @app.route("/.git/config")
+@app.route("/.gitconfig")
 @app.route("/admin")
 @app.route("/app.js")
+@app.route("/application.yml")
 @app.route("/appsettings.json")
 @app.route("/backup")
+@app.route("/composer.json")
 @app.route("/config")
+@app.route("/config.js")
 @app.route("/config.php")
 @app.route("/database")
+@app.route("/database.php")
+@app.route("/db.php")
+@app.route("/docker-compose.yml")
 @app.route("/info.php")
 @app.route("/phpinfo.php")
 @app.route("/server.js")
+@app.route("/settings.php")
+@app.route("/web.config")
 @app.route("/wp-config.php")
 def honeypot():
     """Honeypot endpoint to catch scrapers."""
