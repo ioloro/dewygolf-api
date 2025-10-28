@@ -1,21 +1,13 @@
 #!/usr/bin/env python3
-"""
-Golf Course Search API
-A production-ready Flask application with SSL, database health checks, 
-and API key authentication for searching golf courses.
-Uses pg8000 (pure Python PostgreSQL driver)
-"""
 
+from flask import Flask, request, jsonify, g, redirect
+import sqlite3
+import math
 import os
 import logging
+from logging.handlers import RotatingFileHandler
 import sys
-from datetime import datetime
-from typing import Dict, Any, Optional, Tuple
-import pg8000.native
-from flask import Flask, request, jsonify
-from functools import wraps
-import traceback
-import uuid as uuid_lib
+from urllib.parse import urlparse, parse_qs
 
 # ============================================================================
 # LOGGING CONFIGURATION - OVER THE TOP DIAGNOSTICS
@@ -50,7 +42,7 @@ api_logger.setLevel(logging.INFO)
 error_logger.setLevel(logging.ERROR)
 
 logger.info("=" * 80)
-logger.info("Golf Course API Application Starting")
+logger.info("Dewy Golf Flask app setup")
 logger.info("=" * 80)
 
 # ============================================================================
@@ -61,34 +53,68 @@ app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
 
 # Database configuration from environment variables
-DB_CONFIG = {
-    'host': os.getenv('DB_HOST', 'localhost'),
-    'port': int(os.getenv('DB_PORT', '5432')),
-    'database': os.getenv('DB_NAME', 'golf_db'),
-    'user': os.getenv('DB_USER', 'postgres'),
-    'password': os.getenv('DB_PASSWORD', ''),
-}
+DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///golfcourses.db')
 
-logger.info(f"Database configuration loaded: host={DB_CONFIG['host']}, "
-            f"port={DB_CONFIG['port']}, database={DB_CONFIG['database']}, "
-            f"user={DB_CONFIG['user']}")
+logger.info(f"Database configuration loaded: {DATABASE_URL}")
 
-db_logger.info("Using pg8000 pure Python PostgreSQL driver (native interface)")
 
 # ============================================================================
 # DATABASE OPERATIONS
 # ============================================================================
 
 def get_db_connection():
-    """Get a new database connection using pg8000.native."""
-    try:
-        db_logger.debug("Creating new database connection...")
-        conn = pg8000.native.Connection(**DB_CONFIG)
-        db_logger.debug("✓ Database connection created")
-        return conn
-    except Exception as e:
-        error_logger.error(f"✗ Failed to create database connection: {str(e)}")
-        raise
+    
+"""Get database connection for the current request."""
+    db = getattr(g, '_database', None)
+    if db is None:
+        try:
+            import pg8000.native
+            
+            # Parse the PostgreSQL URL
+            parsed = urlparse(DATABASE)
+            
+            # Extract connection parameters
+            username = parsed.username
+            password = parsed.password
+            host = parsed.hostname
+            port = parsed.port or 5432
+            database = parsed.path.lstrip('/')
+            
+            # Parse query parameters for SSL settings
+            query_params = parse_qs(parsed.query)
+            ssl_mode = query_params.get('sslmode', ['prefer'])[0]
+            
+            app.logger.info(f'Connecting to PostgreSQL: host={host}, port={port}, database={database}, user={username}, sslmode={ssl_mode}')
+            
+            # Create connection with SSL if required
+            if ssl_mode == 'require':
+                db = g._database = pg8000.native.Connection(
+                    user=username,
+                    password=password,
+                    host=host,
+                    port=port,
+                    database=database,
+                    ssl_context=True
+                )
+            else:
+                db = g._database = pg8000.native.Connection(
+                    user=username,
+                    password=password,
+                    host=host,
+                    port=port,
+                    database=database
+                )
+            
+            app.logger.info('PostgreSQL connection established successfully')
+            
+        except ImportError:
+            app.logger.error('pg8000 not installed. Install with: pip install pg8000')
+            raise
+        except Exception as e:
+            app.logger.error(f'Failed to connect to PostgreSQL: {str(e)}', exc_info=True)
+            raise
+
+
 
 
 def check_database_health() -> Tuple[bool, Dict[str, Any]]:
