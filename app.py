@@ -207,8 +207,8 @@ def verify_api_key_rate_limit(apiKey):
         users_db = get_db()
         
         result = users_db.run(
-            'SELECT request_count, last_reset FROM users WHERE apiKey = :apiKey',
-            apiKey=apiKey
+            'SELECT request_count, last_reset FROM users WHERE uuid = :uuid',
+            uuid=apiKey
         )
         user_data = result[0] if result else None
         
@@ -225,9 +225,9 @@ def verify_api_key_rate_limit(apiKey):
         # Reset counter if more than 24 hours have passed
         if datetime.utcnow() - last_reset > timedelta(hours=24):
             users_db.run(
-                'UPDATE users SET request_count = 0, last_reset = :now WHERE apiKey = :apiKey',
+                'UPDATE users SET request_count = 0, last_reset = :now WHERE uuid = :uuid',
                 now=datetime.utcnow(),
-                apiKey=apiKey
+                uuid=apiKey
             )
             return True
         
@@ -248,10 +248,10 @@ def increment_api_key_usage(apiKey):
         users_db.run(
             '''UPDATE users 
                SET request_count = request_count + 1, 
-                   last_used_at = :now 
-               WHERE apiKey = :apiKey''',
-            now=datetime.utcnow(),
-            apiKey=apiKey
+                   "lastActivityDate" = :now 
+               WHERE uuid = :uuid''',
+            now=datetime.utcnow().isoformat(),
+            uuid=apiKey
         )
     except Exception as e:
         app.logger.error(f'Error incrementing API key usage: {str(e)}')
@@ -277,28 +277,20 @@ def require_api_key(f):
             log_security_event('INVALID_API_KEY_FORMAT', f'Malformed API key from {request.remote_addr}')
             return jsonify({'error': 'Invalid API key format'}), 401
         
-        # Check if users database is available
-        # if not users_db_available:
-        #     app.logger.warning('Users database unavailable - falling back to config check')
-        #     if apiKey not in API_KEYS:
-        #         log_security_event('INVALID_API_KEY', f'Invalid API key attempt from {request.remote_addr}')
-        #         return jsonify({'error': 'Invalid API key'}), 401
-        #     return f(*args, **kwargs)
-        
         try:
             users_db = get_db()
             
             # Check if API key exists in database
             result = users_db.run(
-                'SELECT apiKey, is_banned, is_active, request_count FROM users WHERE apiKey = :apiKey',
-                apiKey=apiKey
+                'SELECT uuid, banned, "isActive", request_count FROM users WHERE uuid = :uuid',
+                uuid=apiKey
             )
             user = result[0] if result else None
 
             if user:
                 # Extract user data
-                is_banned = user[1] if isinstance(user, (tuple, list)) else user['is_banned']
-                is_active = user[2] if isinstance(user, (tuple, list)) else user['is_active']
+                is_banned = user[1] if isinstance(user, (tuple, list)) else user['banned']
+                is_active = user[2] if isinstance(user, (tuple, list)) else user['isActive']
                 
                 # Check if user is banned
                 if is_banned:
@@ -332,15 +324,18 @@ def require_api_key(f):
                 app.logger.info(f'New API key detected from {request.remote_addr}, creating user account')
                 
                 users_db.run(
-                    '''INSERT INTO users (apiKey, is_banned, is_active, created_at, last_used_at, request_count, last_reset) 
-                       VALUES (:apiKey, :is_banned, :is_active, :created_at, :last_used_at, :request_count, :last_reset)''',
-                    apiKey=apiKey,
-                    is_banned=False,
-                    is_active=True,
-                    created_at=datetime.utcnow(),
-                    last_used_at=datetime.utcnow(),
+                    '''INSERT INTO users (uuid, banned, "isActive", "firstConnectionDate", "lastActivityDate", request_count, last_reset, "displayName", "passwordResetRequired", "dewyPremium") 
+                       VALUES (:uuid, :banned, :isActive, :firstConnectionDate, :lastActivityDate, :request_count, :last_reset, :displayName, :passwordResetRequired, :dewyPremium)''',
+                    uuid=apiKey,
+                    banned=False,
+                    isActive=True,
+                    firstConnectionDate=datetime.utcnow().isoformat(),
+                    lastActivityDate=datetime.utcnow().isoformat(),
                     request_count=1,
-                    last_reset=datetime.utcnow()
+                    last_reset=datetime.utcnow().isoformat(),
+                    displayName='',
+                    passwordResetRequired=False,
+                    dewyPremium=False
                 )
 
                 # Store API key in g
@@ -506,13 +501,15 @@ def honeypot():
         
         # Ban the API key if present
         apiKey = request.headers.get('X-API-Key') or request.args.get('apiKey')
-        if apiKey and users_db_available:
+        if apiKey:
             try:
                 users_db = get_db()
                 users_db.run(
-                    'UPDATE users SET is_banned = :banned WHERE apiKey = :apiKey',
+                    'UPDATE users SET banned = :banned, "bannedDate" = :bannedDate, "banReason" = :banReason WHERE uuid = :uuid',
                     banned=True,
-                    apiKey=apiKey
+                    bannedDate=datetime.utcnow().isoformat(),
+                    banReason='Honeypot triggered',
+                    uuid=apiKey
                 )
                 app.logger.warning(f'API key banned after honeypot trigger: {apiKey[:8]}...')
             except Exception as e:
@@ -550,19 +547,59 @@ def course_to_dict(row):
     if isinstance(row, dict):
         return dict(row)
     
-    # SQLite row
-    return {
-        'id': row[0],
-        'name': row[1],
-        'address': row[2],
-        'city': row[3],
-        'zipcode': row[4],
-        'website': row[5],
-        'phone': row[6],
-        'holes': row[7],
-        'lat': row[8],
-        'lng': row[9]
-    }
+    # pg8000 returns list of tuples with column names
+    # Assuming columns are: id, name, latitude, longitude, address, website, phone, timezone, uuid
+    if isinstance(row, (list, tuple)):
+        return {
+            'id': row[0],
+            'name': row[1],
+            'latitude': float(row[2]) if row[2] is not None else None,
+            'longitude': float(row[3]) if row[3] is not None else None,
+            'address': row[4],
+            'website': row[5],
+            'phone': row[6],
+            'timezone': row[7],
+            'uuid': row[8] if len(row) > 8 else None
+        }
+    else:
+        # If it's a dict-like object
+        return {
+            'id': row[0],
+            'name': row[1],
+            'latitude': float(row[2]) if row[2] is not None else None,
+            'longitude': float(row[3]) if row[3] is not None else None,
+            'address': row[4],
+            'website': row[5],
+            'phone': row[6],
+            'timezone': row[7],
+            'uuid': row[8] if len(row) > 8 else None
+        }
+
+def user_to_dict(row):
+    """Convert database row to dictionary."""
+    # pg8000 returns list of tuples with column names
+    if isinstance(row, (list, tuple)):
+        return {
+            'id': row[0],
+            'uuid': row[1] if len(row) > 1 else None,
+            'displayName': row[2] if len(row) > 2 else None,
+            'firstConnectionDate': row[3] if len(row) > 3 else None,
+            'isActive': row[4] if len(row) > 4 else None,
+            'passwordResetRequired': row[5] if len(row) > 5 else None,
+            'banned': row[6] if len(row) > 6 else None,
+            'lastActivityDate': row[7] if len(row) > 7 else None,
+            'email': row[8] if len(row) > 8 else None,
+            'bannedDate': row[9] if len(row) > 9 else None,
+            'bannedBy': row[10] if len(row) > 10 else None,
+            'banReason': row[11] if len(row) > 11 else None,
+            'role': row[12] if len(row) > 12 else None,
+            'dewyPremium': row[13] if len(row) > 13 else None,
+            'dewyPremiumExpiration': row[14] if len(row) > 14 else None,
+            'singleGameCount': row[15] if len(row) > 15 else None
+        }
+    else:
+        # If it's a dict-like object
+        return dict(row)
 
 # ============================================================================
 # API ENDPOINTS
@@ -614,8 +651,8 @@ def search():
             # Calculate distances
             courses_with_distance = []
             for course in all_courses:
-                course_lat = get_row_value(course, 8)
-                course_lng = get_row_value(course, 9)
+                course_lat = get_row_value(course, 2)  # latitude is index 2
+                course_lng = get_row_value(course, 3)  # longitude is index 3
                 
                 if course_lat and course_lng:
                     try:
@@ -646,7 +683,7 @@ def search():
             
             cursor = db.cursor()
             cursor.execute(
-                'SELECT * FROM golfcourse WHERE LOWER(city) LIKE LOWER(%s) LIMIT %s',
+                'SELECT * FROM golfcourse WHERE LOWER(address) LIKE LOWER(%s) LIMIT %s',
                 (f'%{city}%', limit)
             )
             results = cursor.fetchall()
@@ -688,7 +725,7 @@ def search():
             
             cursor = db.cursor()
             cursor.execute(
-                'SELECT * FROM golfcourse WHERE name ILIKE %s LIMIT %s',
+                'SELECT * FROM golfcourse WHERE LOWER(name) LIKE LOWER(%s) LIMIT %s',
                 (f'%{name}%', limit)
             )
             results = cursor.fetchall()
@@ -717,99 +754,6 @@ def search():
             'success': False,
             'error': 'Internal server error'
         }), 500
-
-def course_to_dict(row):
-    """Convert database row to dictionary."""
-    # pg8000 returns list of tuples with column names
-    # Assuming columns are: id, name, latitude, longitude, address, website, phone, timezone, uuid
-    if isinstance(row, (list, tuple)):
-        return {
-            'id': row[0],
-            'name': row[1],
-            'latitude': float(row[2]) if row[2] is not None else None,
-            'longitude': float(row[3]) if row[3] is not None else None,
-            'address': row[4],
-            'website': row[5],
-            'phone': row[6],
-            'timezone': row[7],
-            'uuid': row[8] if len(row) > 8 else None
-        }
-    else:
-        # If it's a dict-like object
-        return {
-            'id': row[0],
-            'name': row[1],
-            'latitude': float(row[2]) if row[2] is not None else None,
-            'longitude': float(row[3]) if row[3] is not None else None,
-            'address': row[4],
-            'website': row[5],
-            'phone': row[6],
-            'timezone': row[7],
-            'uuid': row[8] if len(row) > 8 else None
-        }
-
-def user_to_dict(row):
-    """Convert database row to dictionary."""
-    # pg8000 returns list of tuples with column names
-    # Assuming columns are: 
-    if isinstance(row, (list, tuple)):
-        return {
-            'id': row[0],
-            'uuid': row[1] if len(row) > 8 else None,
-            'displayName': row[2],
-            'firstConnectionDate': row[3],
-            'isActive': row[4],
-            'passwordResetRequired': row[5],
-            'banned': row[6],
-            'lastActivityDate': row[7],
-            'email': row[8],
-            'bannedDate': row[9],
-            'bannedBy': row[10],
-            'banReason': row[11],
-            'role': row[12],
-            'dewyPremium': row[13],
-            'dewyPremiumExpiration': row[14],
-            'singleGameCount': row[15]
-        }
-    else:
-        # If it's a dict-like object
-        return {
-            'id': row[0],
-            'uuid': row[1] if len(row) > 8 else None,
-            'displayName': row[2],
-            'firstConnectionDate': row[3],
-            'isActive': row[4],
-            'passwordResetRequired': row[5],
-            'banned': row[6],
-            'lastActivityDate': row[7],
-            'email': row[8],
-            'bannedDate': row[9],
-            'bannedBy': row[10],
-            'banReason': row[11],
-            'role': row[12],
-            'dewyPremium': row[13],
-            'dewyPremiumExpiration': row[14],
-            'singleGameCount': row[15]
-        }
-        
-
-def get_row_value(row, index):
-    """Get value from row by index - works with both SQLite Row objects and PostgreSQL tuples."""
-    return row[index]
-
-def calculate_distance(lat1, lon1, lat2, lon2):
-    """Calculate the great circle distance between two points on Earth in miles."""
-    R = 3959  # Earth's radius in miles
-    
-    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    
-    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
-    c = 2 * math.asin(math.sqrt(a))
-    
-    return R * c
-
 
 # ============================================================================
 # DB CONNECTIONS
@@ -867,18 +811,15 @@ def init_db():
             conn.run('''
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
-                    "apiKey" TEXT NOT NULL DEFAULT '',
-                    is_banned BOOLEAN NOT NULL DEFAULT false,
-                    is_active BOOLEAN NOT NULL DEFAULT true,
-                    created_at TEXT,
-                    last_used_at TEXT,
+                    uuid TEXT NOT NULL DEFAULT '',
+                    banned BOOLEAN NOT NULL DEFAULT false,
+                    "isActive" BOOLEAN NOT NULL DEFAULT true,
+                    "firstConnectionDate" TEXT,
+                    "lastActivityDate" TEXT,
                     request_count INTEGER DEFAULT 0,
                     last_reset TEXT,
-                    uuid TEXT NOT NULL DEFAULT '',
                     "displayName" TEXT NOT NULL DEFAULT '',
-                    "firstConnectionDate" TEXT NOT NULL DEFAULT '',
                     "passwordResetRequired" BOOLEAN NOT NULL DEFAULT false,
-                    "lastActivityDate" TEXT,
                     email TEXT,
                     "bannedDate" TEXT,
                     "bannedBy" TEXT,
