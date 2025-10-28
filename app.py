@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify, g, redirect
+from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import logging
@@ -15,12 +16,13 @@ from urllib.parse import urlparse, parse_qs
 
 app = Flask(__name__)
 
+CORS_ORIGINS = app.config['CORS_ORIGINS']
 DATABASE_URL = os.environ.get('DATABASE_URL')
+EXPECTED_SSL_FINGERPRINTS = os.environ.get('EXPECTED_SSL_FINGERPRINTS', '').split(',') if os.environ.get('EXPECTED_SSL_FINGERPRINTS') else []
+HONEYPOT_ENABLED = os.environ.get('HONEYPOT_ENABLED', 'true').lower() == 'true'
+MAX_REQUESTS_PER_API_KEY = int(os.environ.get('MAX_REQUESTS_PER_API_KEY', 10))
 RATE_LIMIT_ENABLED = os.environ.get('RATE_LIMIT_ENABLED', 'true').lower() == 'true'
 SSL_PINNING_ENABLED = os.environ.get('SSL_PINNING_ENABLED', 'true').lower() == 'true'
-EXPECTED_SSL_FINGERPRINTS = os.environ.get('EXPECTED_SSL_FINGERPRINTS', '').split(',') if os.environ.get('EXPECTED_SSL_FINGERPRINTS') else []
-MAX_REQUESTS_PER_API_KEY = int(os.environ.get('MAX_REQUESTS_PER_API_KEY', 10))
-HONEYPOT_ENABLED = os.environ.get('HONEYPOT_ENABLED', 'true').lower() == 'true'
 
 app.logger.info(f'DATABASE_URL: {DATABASE_URL}; RATE_LIMIT_ENABLED {RATE_LIMIT_ENABLED}; SSL_PINNING_ENABLED {SSL_PINNING_ENABLED}; EXPECTED_SSL_FINGERPRINTS {EXPECTED_SSL_FINGERPRINTS}; MAX_REQUESTS_PER_API_KEY {MAX_REQUESTS_PER_API_KEY}; HONEYPOT_ENABLED {HONEYPOT_ENABLED}')
 DATABASE = DATABASE_URL
@@ -33,12 +35,85 @@ limiter = Limiter(
     strategy='fixed-window'
 )
 
+cors = CORS(app, 
+    origins=CORS_ORIGINS,
+    methods=['GET', 'POST'],
+    allow_headers=['Content-Type', 'X-API-Key'],
+    max_age=3600
+)
+
 # ============================================================================
 # SSL PINNING AND CERTIFICATE VERIFICATION
 # ============================================================================
 
+def get_ssl_fingerprint(peer_cert):
+    """Extract SHA256 fingerprint from SSL certificate."""
+    try:
+        der_cert = ssl.DER_cert_to_PEM_cert(peer_cert)
+        # Convert PEM to DER for hashing
+        cert_bytes = ssl.PEM_cert_to_DER_cert(der_cert)
+        fingerprint = hashlib.sha256(cert_bytes).hexdigest()
+        return fingerprint.upper()
+    except Exception as e:
+        app.logger.error(f'Error extracting SSL fingerprint: {str(e)}')
+        return None
+
+def verify_ssl_pinning():
+    """Verify SSL certificate pinning for incoming requests."""
+    if not app.config['SSL_PINNING_ENABLED']:
+        return True
+    
+    try:
+        # Get client certificate if provided
+        peer_cert = request.environ.get('SSL_CLIENT_CERT')
+        if not peer_cert:
+            # No client cert provided, check if required
+            if app.config['EXPECTED_SSL_FINGERPRINTS']:
+                log_security_event('SSL_PINNING_FAILED', 'No client certificate provided')
+                return False
+            return True
+        
+        fingerprint = get_ssl_fingerprint(peer_cert)
+        if not fingerprint:
+            log_security_event('SSL_PINNING_FAILED', 'Could not extract certificate fingerprint')
+            return False
+        
+        # Check against expected fingerprints
+        if app.config['EXPECTED_SSL_FINGERPRINTS']:
+            if fingerprint not in app.config['EXPECTED_SSL_FINGERPRINTS']:
+                log_security_event('SSL_PINNING_FAILED', f'Certificate fingerprint mismatch: {fingerprint}')
+                return False
+        
+        return True
+    except Exception as e:
+        log_security_event('SSL_PINNING_ERROR', f'SSL verification error: {str(e)}')
+        return False
+
+# ============================================================================
+# SECURITY HEADERS
+# ============================================================================
+
+@app.after_request
+def add_security_headers(response):
+    """Add comprehensive security headers to all responses."""
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains; preload'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; object-src 'none'"
+    response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
+    response.headers['X-Permitted-Cross-Domain-Policies'] = 'none'
+    
+    # Remove server information
+    response.headers.pop('Server', None)
+    
+    return response
 
 
+# ============================================================================
+# LOGGING CONFIGURATION
+# ============================================================================
 
 # Configure logging
 def setup_logging():
