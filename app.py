@@ -702,7 +702,8 @@ def search():
         elif zipcode:
             app.logger.info(f'Performing zipcode-based search for: {zipcode}')
             
-            cursor = db.cursor()
+            # cursor = db.cursor()
+            cursor = get_db()
             cursor.execute(
                 'SELECT * FROM golfcourse WHERE address LIKE %s LIMIT %s',
                 (f'%{zipcode}%', limit)
