@@ -28,7 +28,7 @@ DATABASE = DATABASE_URL
 limiter = Limiter(
     app=app,
     key_func=get_remote_address,
-    default_limits=["60 per hour", "10 per minute"] if app.config['RATE_LIMIT_ENABLED'] else [],
+    default_limits=["60 per hour", "10 per minute"] if RATE_LIMIT_ENABLED else [],
     storage_uri=os.environ.get('RATE_LIMIT_STORAGE_URI', 'memory://'),
     strategy='fixed-window'
 )
