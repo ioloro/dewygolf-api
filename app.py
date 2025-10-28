@@ -204,7 +204,7 @@ def hash_api_key(apiKey):
 def verify_api_key_rate_limit(apiKey):
     """Check if API key has exceeded its rate limit."""
     try:
-        users_db = get_db()
+        users_db = get_db('users')
         
         result = users_db.run(
             'SELECT request_count, last_reset FROM users WHERE apiKey = :apiKey',
@@ -243,7 +243,7 @@ def verify_api_key_rate_limit(apiKey):
 def increment_api_key_usage(apiKey):
     """Increment the request count for an API key."""
     try:
-        users_db = get_db()
+        users_db = get_db('users')
 
         users_db.run(
             '''UPDATE users 
@@ -286,7 +286,7 @@ def require_api_key(f):
         #     return f(*args, **kwargs)
         
         try:
-            users_db = get_db()
+            users_db = get_db('users')
             
             # Check if API key exists in database
             result = users_db.run(
@@ -508,7 +508,7 @@ def honeypot():
         apiKey = request.headers.get('X-API-Key') or request.args.get('apiKey')
         if apiKey and users_db_available:
             try:
-                users_db = get_db()
+                users_db = get_db('users')
                 users_db.run(
                     'UPDATE users SET is_banned = :banned WHERE apiKey = :apiKey',
                     banned=True,
@@ -594,7 +594,7 @@ def search():
             log_security_event('VALIDATION_ERROR', str(e))
             return jsonify({'success': False, 'error': str(e)}), 400
         
-        db = get_db()
+        db = get_db('golfCourse')
         
         lat = validated_data.get('lat')
         lng = validated_data.get('lng')
@@ -740,7 +740,7 @@ def health_check():
         # Test database connections
         if golf_courses_db_available:
             try:
-                db = get_db()
+                db = get_db('golfCourse')
                 cursor = db.cursor()
                 cursor.execute('SELECT 1')
             except Exception as e:
@@ -749,7 +749,7 @@ def health_check():
         
         if users_db_available:
             try:
-                users_db = get_db()
+                users_db = get_db('users')
                 cursor = users_db.cursor()
                 cursor.execute('SELECT 1')
             except Exception as e:
@@ -1178,17 +1178,22 @@ def init_db():
         return False
 init_db()
 
-def get_db():
-    """Get database connection for the current request."""
+def get_db(table_name):
+    """Get database connection and return data from the specified table.
+    
+    Args:
+        table_name: Either "golfcourse" or "users"
+    """
     db = getattr(g, '_database', None)
-    app.logger.debug('Attempted to read db {db}')
+    app.logger.debug(f'Attempted to read db {db}')
+    
     if db is None:
         try:
             import pg8000.native
             
             # Parse the PostgreSQL URL
             parsed = urlparse(DATABASE)
-            app.logger.debug('parsed {parsed}')
+            app.logger.debug(f'parsed {parsed}')
             
             # Extract connection parameters
             username = parsed.username
@@ -1230,7 +1235,20 @@ def get_db():
         except Exception as e:
             app.logger.error(f'Failed to connect to PostgreSQL: {str(e)}', exc_info=True)
             raise
-    return db
+    
+    # Validate table name and query the table
+    valid_tables = ['golfcourse', 'users']
+    if table_name.lower() not in valid_tables:
+        raise ValueError(f"Invalid table name. Must be one of: {valid_tables}")
+    
+    try:
+        result = db.run(f'SELECT * FROM {table_name.lower()}')
+        app.logger.info(f'Retrieved {len(result)} rows from {table_name}')
+        return result
+    except Exception as e:
+        app.logger.error(f'Failed to query table {table_name}: {str(e)}', exc_info=True)
+        raise
+
 
 @app.teardown_appcontext
 def close_db(error):
@@ -1246,7 +1264,7 @@ def close_db(error):
 def test_golf_courses_db_connection():
     """Test connection to golf courses database."""
     try:
-        db = get_db()
+        db = get_db('golfCourse')
         cursor = db.cursor()
         cursor.execute('SELECT 1')
         app.logger.info(f'Golf courses database connection successful')
@@ -1258,7 +1276,7 @@ def test_golf_courses_db_connection():
 def test_users_db_connection():
     """Test connection to users database."""
     try:
-        users_db = get_db()
+        users_db = get_db('users')
         cursor = users_db.cursor()
         cursor.execute('SELECT 1')
         app.logger.info(f'Users database connection successful')
