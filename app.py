@@ -70,7 +70,7 @@ def get_ssl_fingerprint(peer_cert):
 
 def verify_ssl_pinning():
     """Verify SSL certificate pinning for incoming requests."""
-    if not app.config['SSL_PINNING_ENABLED']:
+    if not SSL_PINNING_ENABLED:
         return True
     
     try:
@@ -78,7 +78,7 @@ def verify_ssl_pinning():
         peer_cert = request.environ.get('SSL_CLIENT_CERT')
         if not peer_cert:
             # No client cert provided, check if required
-            if app.config['EXPECTED_SSL_FINGERPRINTS']:
+            if EXPECTED_SSL_FINGERPRINTS:
                 log_security_event('SSL_PINNING_FAILED', 'No client certificate provided')
                 return False
             return True
@@ -89,8 +89,8 @@ def verify_ssl_pinning():
             return False
         
         # Check against expected fingerprints
-        if app.config['EXPECTED_SSL_FINGERPRINTS']:
-            if fingerprint not in app.config['EXPECTED_SSL_FINGERPRINTS']:
+        if EXPECTED_SSL_FINGERPRINTS:
+            if fingerprint not in EXPECTED_SSL_FINGERPRINTS:
                 log_security_event('SSL_PINNING_FAILED', f'Certificate fingerprint mismatch: {fingerprint}')
                 return False
         
@@ -231,7 +231,7 @@ def verify_api_key_rate_limit(apiKey):
             return True
         
         # Check if limit exceeded
-        if request_count >= app.config['MAX_REQUESTS_PER_API_KEY']:
+        if request_count >= MAX_REQUESTS_PER_API_KEY:
             return False
         
         return True
@@ -279,7 +279,7 @@ def require_api_key(f):
         # Check if users database is available
         if not users_db_available:
             app.logger.warning('Users database unavailable - falling back to config check')
-            if apiKey not in app.config['API_KEYS']:
+            if apiKey not in API_KEYS:
                 log_security_event('INVALID_API_KEY', f'Invalid API key attempt from {request.remote_addr}')
                 return jsonify({'error': 'Invalid API key'}), 401
             return f(*args, **kwargs)
@@ -314,7 +314,7 @@ def require_api_key(f):
                     log_security_event('API_KEY_RATE_LIMIT', f'API key {apiKey[:8]}... exceeded rate limit')
                     return jsonify({
                         'error': 'API key rate limit exceeded',
-                        'limit': app.config['MAX_REQUESTS_PER_API_KEY'],
+                        'limit': MAX_REQUESTS_PER_API_KEY,
                         'reset_in': '24 hours'
                     }), 429
                 
@@ -500,7 +500,7 @@ def check_security():
 @app.route("/database")
 def honeypot():
     """Honeypot endpoint to catch scrapers."""
-    if app.config['HONEYPOT_ENABLED']:
+    if HONEYPOT_ENABLED:
         log_security_event('HONEYPOT_TRIGGERED', f'Suspicious access to honeypot endpoint: {request.path}')
         
         # Ban the API key if present
