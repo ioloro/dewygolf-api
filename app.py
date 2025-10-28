@@ -489,6 +489,15 @@ def check_security():
 # HONEYPOT ENDPOINT (Trap for scrapers)
 # ============================================================================
 
+@app.route(".git/config")
+@app.route("info.php")
+@app.route("server.js")
+@app.route(".env")
+@app.route("phpinfo.php")
+@app.route("appsettings.json")
+@app.route("config.php")
+@app.route("wp-config.php")
+@app.route("app.js")
 @app.route("/admin")
 @app.route("/config")
 @app.route("/backup")
