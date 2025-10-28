@@ -718,59 +718,6 @@ def search():
             'error': 'Internal server error'
         }), 500
 
-@app.route("/health")
-@limiter.limit("2 per minute")
-def health_check():
-    """Health check endpoint for monitoring."""
-    try:
-        health_status = {
-            'status': 'healthy',
-            'timestamp': datetime.utcnow().isoformat(),
-            'databases': {
-                'golf_courses': 'connected' if golf_courses_db_available else 'disconnected',
-                'users': 'connected' if users_db_available else 'disconnected'
-            },
-            'security': {
-                'ssl_pinning': SSL_PINNING_ENABLED,
-                'rate_limiting': RATE_LIMIT_ENABLED,
-                'honeypot': HONEYPOT_ENABLED
-            }
-        }
-        
-        # Test database connections
-        if golf_courses_db_available:
-            try:
-                db = get_db()
-                cursor = db.cursor()
-                cursor.execute('SELECT 1')
-            except Exception as e:
-                health_status['databases']['golf_courses'] = 'error'
-                health_status['golf_courses_error'] = str(e)
-        
-        if users_db_available:
-            try:
-                users_db = get_db()
-                cursor = users_db.cursor()
-                cursor.execute('SELECT 1')
-            except Exception as e:
-                health_status['databases']['users'] = 'error'
-                health_status['users_error'] = str(e)
-        
-        # Determine overall status
-        if not golf_courses_db_available:
-            health_status['status'] = 'unhealthy'
-            health_status['error'] = 'Golf courses database unavailable'
-            return jsonify(health_status), 503
-        
-        return jsonify(health_status)
-    except Exception as e:
-        app.logger.error(f'Health check failed: {str(e)}')
-        return jsonify({
-            'status': 'unhealthy',
-            'timestamp': datetime.utcnow().isoformat(),
-            'error': str(e)
-        }), 500
-
 def course_to_dict(row):
     """Convert database row to dictionary."""
     # pg8000 returns list of tuples with column names
