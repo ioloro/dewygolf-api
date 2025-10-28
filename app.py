@@ -730,6 +730,7 @@ def search():
         # ===============================================================
         if zipcode:
             app.logger.info(f"Performing zipcode-based search for: {zipcode}")
+            app.logger.warning(f"get_db() returned: {type(db)} with attributes: {dir(db)}; cursor is a {type(cursor)}")
             cursor.execute(
                 '''
                 SELECT * FROM golfcourse
