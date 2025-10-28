@@ -117,7 +117,7 @@ def get_db_connection():
 
 
 
-def check_database_health() -> Tuple[bool, Dict[str, Any]]:
+# def check_database_health() -> Tuple[bool, Dict[str, Any]]:
     """
     Check database connection and verify golfcourse table exists and is accessible.
     
@@ -274,7 +274,7 @@ def verify_api_key(api_key: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def search_golf_courses(params: Dict[str, str]) -> Tuple[list, int]:
+# def search_golf_courses(params: Dict[str, str]) -> Tuple[list, int]:
     """
     Search golf courses based on various parameters.
     
@@ -460,20 +460,20 @@ def health_check():
     request_id = str(uuid_lib.uuid4())[:8]
     api_logger.info(f"[{request_id}] Health check requested from {request.remote_addr}")
     
-    is_healthy, status = check_database_health()
+    # is_healthy, status = check_database_health()
     
     response_data = {
-        'status': 'healthy' if is_healthy else 'unhealthy',
+        # 'status': 'healthy' if is_healthy else 'unhealthy',
         'timestamp': datetime.utcnow().isoformat(),
-        'checks': status
+        # 'checks': status
     }
     
-    status_code = 200 if is_healthy else 503
+    # status_code = 200 if is_healthy else 503
     
-    api_logger.info(f"[{request_id}] Health check complete: "
-                   f"{'HEALTHY' if is_healthy else 'UNHEALTHY'} (HTTP {status_code})")
+    # api_logger.info(f"[{request_id}] Health check complete: "
+                   # f"{'HEALTHY' if is_healthy else 'UNHEALTHY'} (HTTP {status_code})")
     
-    return jsonify(response_data), status_code
+    # return jsonify(response_data), status_code
 
 
 @app.route('/search', methods=['GET'])
@@ -492,18 +492,18 @@ def search():
         api_logger.debug(f"[{request_id}] Search parameters: {params}")
         
         # Perform search
-        results, total_count = search_golf_courses(params)
+        # results, total_count = search_golf_courses(params)
         
         response_data = {
             'success': True,
-            'count': len(results),
-            'total': total_count,
+            # 'count': len(results),
+            # 'total': total_count,
             'limit': int(params.get('limit', 100)),
             'offset': int(params.get('offset', 0)),
-            'results': results
+            # 'results': results
         }
         
-        api_logger.info(f"[{request_id}] ✓ Search successful: {len(results)} results returned")
+        # api_logger.info(f"[{request_id}] ✓ Search successful: {len(results)} results returned")
         
         return jsonify(response_data), 200
         
