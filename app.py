@@ -1100,6 +1100,7 @@ def calculate_distance(lat1, lon1, lat2, lon2):
 # DB CONNECTIONS
 # ============================================================================
 def init_db():
+    app.logger.debug('init_db called; database {database}')
     """Initialize the database with required tables."""
     try:
         import pg8000.native
@@ -1175,6 +1176,7 @@ def init_db():
     except Exception as e:
         app.logger.error(f'Failed to initialize database: {str(e)}', exc_info=True)
         return False
+init_db()
 
 def get_db():
     """Get database connection for the current request."""
@@ -1319,4 +1321,3 @@ app.logger.info(f'- Max Requests per API Key: {MAX_REQUESTS_PER_API_KEY}/24h')
 if __name__ == '__main__':
     app.logger.info('Starting Flask server')
     app.run(debug=True)
-    init_db()
