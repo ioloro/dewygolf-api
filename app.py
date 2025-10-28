@@ -1303,12 +1303,27 @@ users_db_available = False
 if test_golf_courses_db_connection():
     golf_courses_db_available = True
     try:
-        db = database
+        app.logger.debug('Attempting to test IF test_golf_courses_db_connection')
+        db = get_db('golfCourse')
+        app.logger.debug('test_golf_courses_db_connection: db {db}')
         cursor = db.cursor()
-        cursor.execute('SELECT COUNT(*) FROM golfcourse')
-        result = cursor.fetchone()
-        course_count = result[0] if result else 0
-        app.logger.info(f'Golf courses database ready - Total courses: {course_count}')
+        app.logger.debug('test_golf_courses_db_connection: cursor {cursor}')
+        cursor.execute('SELECT 1')
+        app.logger.debug('test_golf_courses_db_connection: cursor execute')
+        app.logger.info(f'Golf courses database connection successful')
+
+
+
+
+
+
+
+        # db = database
+        # cursor = db.cursor()
+        # cursor.execute('SELECT COUNT(*) FROM golfcourse')
+        # result = cursor.fetchone()
+        # course_count = result[0] if result else 0
+        # app.logger.info(f'Golf courses database ready - Total courses: {course_count}')
     except Exception as e:
         app.logger.warning(f'Golf courses database connected but table may not exist: {str(e)}')
 else:
