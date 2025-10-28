@@ -216,6 +216,50 @@ def course_to_dict(row):
             'timezone': row[7],
             'uuid': row[8] if len(row) > 8 else None
         }
+
+def user_to_dict(row):
+    """Convert database row to dictionary."""
+    # pg8000 returns list of tuples with column names
+    # Assuming columns are: 
+    if isinstance(row, (list, tuple)):
+        return {
+            'id': row[0],
+            'uuid': row[1] if len(row) > 8 else None,
+            'displayName': row[2],
+            'firstConnectionDate': row[3],
+            'isActive': row[4],
+            'passwordResetRequired': row[5],
+            'banned': row[6],
+            'lastActivityDate': row[7],
+            'email': row[8],
+            'bannedDate': row[9],
+            'bannedBy': row[10],
+            'banReason': row[11],
+            'role': row[12],
+            'dewyPremium': row[13],
+            'dewyPremiumExpiration': row[14],
+            'singleGameCount': row[15]
+        }
+    else:
+        # If it's a dict-like object
+        return {
+            'id': row[0],
+            'uuid': row[1] if len(row) > 8 else None,
+            'displayName': row[2],
+            'firstConnectionDate': row[3],
+            'isActive': row[4],
+            'passwordResetRequired': row[5],
+            'banned': row[6],
+            'lastActivityDate': row[7],
+            'email': row[8],
+            'bannedDate': row[9],
+            'bannedBy': row[10],
+            'banReason': row[11],
+            'role': row[12],
+            'dewyPremium': row[13],
+            'dewyPremiumExpiration': row[14],
+            'singleGameCount': row[15]
+        }
         
 
 def get_row_value(row, index):
@@ -450,7 +494,7 @@ def authenticate():
                 'success': True,
                 'search_type': 'apiKey',
                 'search_term': apiKey,
-                'results': [course_to_dict(row) for row in results],
+                'results': [user_to_dict(row) for row in results],
                 'total_found': len(results)
             })
         
