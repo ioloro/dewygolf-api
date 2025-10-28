@@ -1048,46 +1048,70 @@ def authenticate():
             'error': str(e)
         }), 500
 
-# Initialize database on startup
-if init_db():
-    try:
-        import pg8000.native
-            
-        parsed = urlparse(DATABASE)
-        username = parsed.username
-        password = parsed.password
-        host = parsed.hostname
-        port = parsed.port or 5432
-        database = parsed.path.lstrip('/')
-        query_params = parse_qs(parsed.query)
-        ssl_mode = query_params.get('sslmode', ['prefer'])[0]
-        
-        if ssl_mode == 'require':
-            conn = pg8000.native.Connection(
-                user=username,
-                password=password,
-                host=host,
-                port=port,
-                database=database,
-                ssl_context=True
-            )
-        else:
-            conn = pg8000.native.Connection(
-                user=username,
-                password=password,
-                host=host,
-                port=port,
-                database=database
-            )
-        
-        result = conn.run('SELECT COUNT(*) FROM golfcourse')
-        course_count = result[0][0]
-        conn.close()
-        app.logger.info(f'PostgreSQL connection successful - Total courses in database: {course_count}')
+# ============================================================================
+# INITIALIZATION
+# ============================================================================
 
+# Test database connections on startup
+golf_courses_db_available = False
+users_db_available = False
+
+# Test golf courses database connection
+if test_golf_courses_db_connection():
+    golf_courses_db_available = True
+    try:
+        db = get_db()
+        if DB_TYPE == 'postgresql':
+            cursor = db.cursor()
+            cursor.execute('SELECT COUNT(*) FROM golfcourse')
+            result = cursor.fetchone()
+            course_count = result[0] if result else 0
+        else:
+            cursor = db.cursor()
+            cursor.execute('SELECT COUNT(*) FROM golfcourse')
+            course_count = cursor.fetchone()[0]
+        app.logger.info(f'Golf courses database ready - Total courses: {course_count}')
     except Exception as e:
-        app.logger.error(f'Database connection test failed: {str(e)}', exc_info=True)
+        app.logger.warning(f'Golf courses database connected but table may not exist: {str(e)}')
+else:
+    app.logger.error('Golf courses database connection failed - API will not function properly')
+
+# Test users database connection
+if test_users_db_connection():
+    users_db_available = True
+    # Create users table if needed
+    create_users_table()
+    try:
+        users_db = get_users_db()
+        if USERS_DB_TYPE == 'postgresql':
+            cursor = users_db.cursor()
+            cursor.execute('SELECT COUNT(*) FROM users')
+            result = cursor.fetchone()
+            user_count = result[0] if result else 0
+        else:
+            cursor = users_db.cursor()
+            cursor.execute('SELECT COUNT(*) FROM users')
+            user_count = cursor.fetchone()[0]
+        app.logger.info(f'Users database ready - Total users: {user_count}')
+    except Exception as e:
+        app.logger.warning(f'Users database connected but table may not exist: {str(e)}')
+else:
+    app.logger.error('Users database connection failed - User features will not be available')
+
+# Log overall status
+if golf_courses_db_available and users_db_available:
+    app.logger.info('All database connections successful - API fully operational')
+elif golf_courses_db_available:
+    app.logger.warning('Only golf courses database available - User features disabled')
+else:
+    app.logger.error('Critical: No database connections available - API will not function')
+
+app.logger.info('Security features enabled:')
+app.logger.info(f'- SSL Pinning: {app.config["SSL_PINNING_ENABLED"]}')
+app.logger.info(f'- Rate Limiting: {app.config["RATE_LIMIT_ENABLED"]}')
+app.logger.info(f'- Honeypot: {app.config["HONEYPOT_ENABLED"]}')
+app.logger.info(f'- Max Requests per API Key: {app.config["MAX_REQUESTS_PER_API_KEY"]}/24h')
 
 if __name__ == '__main__':
-    app.logger.info('Starting Flask development server')
+    app.logger.info('Starting Flask server')
     app.run(debug=True)
