@@ -578,151 +578,6 @@ def honeypot():
 
 
 
-
-
-
-
-
-# Database configuration
-
-
-def get_db():
-    """Get database connection for the current request."""
-    db = getattr(g, '_database', None)
-    if db is None:
-        try:
-            import pg8000.native
-            
-            # Parse the PostgreSQL URL
-            parsed = urlparse(DATABASE)
-            
-            # Extract connection parameters
-            username = parsed.username
-            password = parsed.password
-            host = parsed.hostname
-            port = parsed.port or 5432
-            database = parsed.path.lstrip('/')
-            
-            # Parse query parameters for SSL settings
-            query_params = parse_qs(parsed.query)
-            ssl_mode = query_params.get('sslmode', ['prefer'])[0]
-            
-            app.logger.info(f'Connecting to PostgreSQL: host={host}, port={port}, database={database}, user={username}, sslmode={ssl_mode}')
-            
-            # Create connection with SSL if required
-            if ssl_mode == 'require':
-                db = g._database = pg8000.native.Connection(
-                    user=username,
-                    password=password,
-                    host=host,
-                    port=port,
-                    database=database,
-                    ssl_context=True
-                )
-            else:
-                db = g._database = pg8000.native.Connection(
-                    user=username,
-                    password=password,
-                    host=host,
-                    port=port,
-                    database=database
-                )
-            
-            app.logger.info('PostgreSQL connection established successfully')
-            
-        except ImportError:
-            app.logger.error('pg8000 not installed. Install with: pip install pg8000')
-            raise
-        except Exception as e:
-            app.logger.error(f'Failed to connect to PostgreSQL: {str(e)}', exc_info=True)
-            raise
-    return db
-
-@app.teardown_appcontext
-def close_connection(exception):
-    """Close database connection at the end of request."""
-    db = getattr(g, '_database', None)
-    if db is not None:
-        db.close()
-        app.logger.debug('Database connection closed')
-
-def init_db():
-    """Initialize the database with required tables."""
-    try:
-        import pg8000.native
-            
-        parsed = urlparse(DATABASE)
-        username = parsed.username
-        password = parsed.password
-        host = parsed.hostname
-        port = parsed.port or 5432
-        database = parsed.path.lstrip('/')
-        query_params = parse_qs(parsed.query)
-        ssl_mode = query_params.get('sslmode', ['prefer'])[0]
-        
-        app.logger.info('Initializing PostgreSQL database tables')
-        
-        if ssl_mode == 'require':
-            conn = pg8000.native.Connection(
-                user=username,
-                password=password,
-                host=host,
-                port=port,
-                database=database,
-                ssl_context=True
-            )
-        else:
-            conn = pg8000.native.Connection(
-                user=username,
-                password=password,
-                host=host,
-                port=port,
-                database=database
-            )
-        
-        conn.run('''
-            CREATE TABLE IF NOT EXISTS golfcourse (
-                id SERIAL PRIMARY KEY,
-                name TEXT NOT NULL,
-                latitude REAL NOT NULL,
-                longitude REAL NOT NULL,
-                address TEXT,
-                website TEXT,
-                phone TEXT,
-                timezone TEXT,
-                uuid TEXT DEFAULT 'constant'
-            )
-        ''')
-
-        conn.run('''
-            CREATE TABLE IF NOT EXISTS users (
-                id SERIAL PRIMARY KEY,
-                uuid TEXT NOT NULL DEFAULT '',
-                "displayName" TEXT NOT NULL DEFAULT '',
-                "firstConnectionDate" TEXT NOT NULL DEFAULT '',
-                "isActive" BOOLEAN NOT NULL DEFAULT true,
-                "passwordResetRequired" BOOLEAN NOT NULL DEFAULT false,
-                banned BOOLEAN NOT NULL DEFAULT false,
-                "lastActivityDate" TEXT,
-                email TEXT,
-                "bannedDate" TEXT,
-                "bannedBy" TEXT,
-                "banReason" TEXT,
-                role TEXT,
-                "dewyPremium" BOOLEAN NOT NULL DEFAULT false,
-                "dewyPremiumExpiration" TEXT,
-                "singleGameCount" INTEGER
-            )
-        ''')
-        
-        conn.close()
-        app.logger.info('PostgreSQL database tables created successfully')
-
-        return True
-    except Exception as e:
-        app.logger.error(f'Failed to initialize database: {str(e)}', exc_info=True)
-        return False
-
 def course_to_dict(row):
     """Convert database row to dictionary."""
     # pg8000 returns list of tuples with column names
@@ -1048,6 +903,177 @@ def authenticate():
             'error': str(e)
         }), 500
 
+
+
+
+# ============================================================================
+# DB CONNECTIONS
+# ============================================================================
+def init_db():
+    """Initialize the database with required tables."""
+    try:
+        import pg8000.native
+            
+        parsed = urlparse(DATABASE)
+        username = parsed.username
+        password = parsed.password
+        host = parsed.hostname
+        port = parsed.port or 5432
+        database = parsed.path.lstrip('/')
+        query_params = parse_qs(parsed.query)
+        ssl_mode = query_params.get('sslmode', ['prefer'])[0]
+        
+        app.logger.info('Initializing PostgreSQL database tables')
+        
+        if ssl_mode == 'require':
+            conn = pg8000.native.Connection(
+                user=username,
+                password=password,
+                host=host,
+                port=port,
+                database=database,
+                ssl_context=True
+            )
+        else:
+            conn = pg8000.native.Connection(
+                user=username,
+                password=password,
+                host=host,
+                port=port,
+                database=database
+            )
+        
+        conn.run('''
+            CREATE TABLE IF NOT EXISTS golfcourse (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                latitude REAL NOT NULL,
+                longitude REAL NOT NULL,
+                address TEXT,
+                website TEXT,
+                phone TEXT,
+                timezone TEXT,
+                uuid TEXT DEFAULT 'constant'
+            )
+        ''')
+
+        conn.run('''
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                uuid TEXT NOT NULL DEFAULT '',
+                "displayName" TEXT NOT NULL DEFAULT '',
+                "firstConnectionDate" TEXT NOT NULL DEFAULT '',
+                "isActive" BOOLEAN NOT NULL DEFAULT true,
+                "passwordResetRequired" BOOLEAN NOT NULL DEFAULT false,
+                banned BOOLEAN NOT NULL DEFAULT false,
+                "lastActivityDate" TEXT,
+                email TEXT,
+                "bannedDate" TEXT,
+                "bannedBy" TEXT,
+                "banReason" TEXT,
+                role TEXT,
+                "dewyPremium" BOOLEAN NOT NULL DEFAULT false,
+                "dewyPremiumExpiration" TEXT,
+                "singleGameCount" INTEGER
+            )
+        ''')
+        
+        conn.close()
+        app.logger.info('PostgreSQL database tables created successfully')
+
+        return True
+    except Exception as e:
+        app.logger.error(f'Failed to initialize database: {str(e)}', exc_info=True)
+        return False
+
+def get_db():
+    """Get database connection for the current request."""
+    db = getattr(g, '_database', None)
+    if db is None:
+        try:
+            import pg8000.native
+            
+            # Parse the PostgreSQL URL
+            parsed = urlparse(DATABASE)
+            
+            # Extract connection parameters
+            username = parsed.username
+            password = parsed.password
+            host = parsed.hostname
+            port = parsed.port or 5432
+            database = parsed.path.lstrip('/')
+            
+            # Parse query parameters for SSL settings
+            query_params = parse_qs(parsed.query)
+            ssl_mode = query_params.get('sslmode', ['prefer'])[0]
+            
+            app.logger.info(f'Connecting to PostgreSQL: host={host}, port={port}, database={database}, user={username}, sslmode={ssl_mode}')
+            
+            # Create connection with SSL if required
+            if ssl_mode == 'require':
+                db = g._database = pg8000.native.Connection(
+                    user=username,
+                    password=password,
+                    host=host,
+                    port=port,
+                    database=database,
+                    ssl_context=True
+                )
+            else:
+                db = g._database = pg8000.native.Connection(
+                    user=username,
+                    password=password,
+                    host=host,
+                    port=port,
+                    database=database
+                )
+            
+            app.logger.info('PostgreSQL connection established successfully')
+            
+        except ImportError:
+            app.logger.error('pg8000 not installed. Install with: pip install pg8000')
+            raise
+        except Exception as e:
+            app.logger.error(f'Failed to connect to PostgreSQL: {str(e)}', exc_info=True)
+            raise
+    return db
+
+@app.teardown_appcontext
+def close_db(error):
+    """Close database connections."""
+    db = g.pop('db', None)
+    if db is not None:
+        db.close()
+    
+    users_db = g.pop('users_db', None)
+    if users_db is not None:
+        users_db.close()
+
+def test_golf_courses_db_connection():
+    """Test connection to golf courses database."""
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute('SELECT 1')
+        app.logger.info(f'Golf courses database connection successful')
+        return True
+    except Exception as e:
+        app.logger.error(f'Golf courses database connection failed: {str(e)}')
+        return False
+
+def test_users_db_connection():
+    """Test connection to users database."""
+    try:
+        users_db = get_db()
+        cursor = users_db.cursor()
+        cursor.execute('SELECT 1')
+        app.logger.info(f'Users database connection successful')
+        return True
+    except Exception as e:
+        app.logger.error(f'Users database connection failed: {str(e)}')
+        return False
+
+
 # ============================================================================
 # INITIALIZATION
 # ============================================================================
@@ -1060,16 +1086,11 @@ users_db_available = False
 if test_golf_courses_db_connection():
     golf_courses_db_available = True
     try:
-        db = get_db()
-        if DB_TYPE == 'postgresql':
-            cursor = db.cursor()
-            cursor.execute('SELECT COUNT(*) FROM golfcourse')
-            result = cursor.fetchone()
-            course_count = result[0] if result else 0
-        else:
-            cursor = db.cursor()
-            cursor.execute('SELECT COUNT(*) FROM golfcourse')
-            course_count = cursor.fetchone()[0]
+        db = database
+        cursor = db.cursor()
+        cursor.execute('SELECT COUNT(*) FROM golfcourse')
+        result = cursor.fetchone()
+        course_count = result[0] if result else 0
         app.logger.info(f'Golf courses database ready - Total courses: {course_count}')
     except Exception as e:
         app.logger.warning(f'Golf courses database connected but table may not exist: {str(e)}')
@@ -1079,19 +1100,12 @@ else:
 # Test users database connection
 if test_users_db_connection():
     users_db_available = True
-    # Create users table if needed
-    create_users_table()
     try:
-        users_db = get_users_db()
-        if USERS_DB_TYPE == 'postgresql':
-            cursor = users_db.cursor()
-            cursor.execute('SELECT COUNT(*) FROM users')
-            result = cursor.fetchone()
-            user_count = result[0] if result else 0
-        else:
-            cursor = users_db.cursor()
-            cursor.execute('SELECT COUNT(*) FROM users')
-            user_count = cursor.fetchone()[0]
+        users_db = database()
+        cursor = users_db.cursor()
+        cursor.execute('SELECT COUNT(*) FROM users')
+        result = cursor.fetchone()
+        user_count = result[0] if result else 0
         app.logger.info(f'Users database ready - Total users: {user_count}')
     except Exception as e:
         app.logger.warning(f'Users database connected but table may not exist: {str(e)}')
@@ -1107,10 +1121,10 @@ else:
     app.logger.error('Critical: No database connections available - API will not function')
 
 app.logger.info('Security features enabled:')
-app.logger.info(f'- SSL Pinning: {app.config["SSL_PINNING_ENABLED"]}')
-app.logger.info(f'- Rate Limiting: {app.config["RATE_LIMIT_ENABLED"]}')
-app.logger.info(f'- Honeypot: {app.config["HONEYPOT_ENABLED"]}')
-app.logger.info(f'- Max Requests per API Key: {app.config["MAX_REQUESTS_PER_API_KEY"]}/24h')
+app.logger.info(f'- SSL Pinning: {SSL_PINNING_ENABLED}')
+app.logger.info(f'- Rate Limiting: {RATE_LIMIT_ENABLED}')
+app.logger.info(f'- Honeypot: {HONEYPOT_ENABLED}')
+app.logger.info(f'- Max Requests per API Key: {MAX_REQUESTS_PER_API_KEY}/24h')
 
 if __name__ == '__main__':
     app.logger.info('Starting Flask server')
