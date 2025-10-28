@@ -64,7 +64,7 @@ logger.info(f"Database configuration loaded: {DATABASE_URL}")
 
 def get_db_connection():
     
-"""Get database connection for the current request."""
+    """Get database connection for the current request."""
     db = getattr(g, '_database', None)
     if db is None:
         try:
