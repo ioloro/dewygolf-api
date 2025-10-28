@@ -507,76 +507,268 @@ def honeypot():
         api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
         if api_key and users_db_available:
             try:
-                users_db = get_users_db()
-                if USERS_DB_TYPE == 'postgresql':
-                    users_db.run(
-                        'UPDATE users SET is_banned = :banned WHERE api_key = :api_key',
-                        banned=True,
-                        api_key=api_key
-                    )
-                else:
-                    cursor = users_db.cursor()
-                    cursor.execute(
-                        'UPDATE users SET is_banned = ? WHERE api_key = ?',
-                        (True, api_key)
-                    )
-                    users_db.commit()
+                users_db = get_db()
+                users_db.run(
+                    'UPDATE users SET is_banned = :banned WHERE api_key = :api_key',
+                    banned=True,
+                    api_key=api_key
+                )
                 app.logger.warning(f'API key banned after honeypot trigger: {api_key[:8]}...')
             except Exception as e:
                 app.logger.error(f'Error banning API key: {str(e)}')
     
     abort(404)
 
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
 
+def calculate_distance(lat1, lng1, lat2, lng2):
+    """Calculate distance between two coordinates using Haversine formula."""
+    R = 3959  # Earth's radius in miles
+    
+    lat1_rad = math.radians(lat1)
+    lat2_rad = math.radians(lat2)
+    delta_lat = math.radians(lat2 - lat1)
+    delta_lng = math.radians(lng2 - lng1)
+    
+    a = math.sin(delta_lat/2) ** 2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(delta_lng/2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    
+    return R * c
 
+def get_row_value(row, index):
+    """Get value from row regardless of database type."""
+    if isinstance(row, dict):
+        keys = list(row.keys())
+        return row[keys[index]]
+    return row[index]
 
+def course_to_dict(row):
+    """Convert database row to dictionary."""
+    if isinstance(row, dict):
+        return dict(row)
+    
+    # SQLite row
+    return {
+        'id': row[0],
+        'name': row[1],
+        'address': row[2],
+        'city': row[3],
+        'zipcode': row[4],
+        'website': row[5],
+        'phone': row[6],
+        'holes': row[7],
+        'lat': row[8],
+        'lng': row[9]
+    }
 
+# ============================================================================
+# API ENDPOINTS
+# ============================================================================
 
+@app.route("/")
+@limiter.limit("2 per minute")
+def root_route():
+    return redirect("https://www.dewygolf.com", code=302)
 
+@app.route("/search", methods=['GET', 'POST'])
+@require_api_key
+@limiter.limit("5 per minute")
+def search():
+    """Search for golf courses with enhanced security."""
+    try:
+        # Get request data
+        if request.method == 'POST':
+            data = request.get_json() or {}
+        else:
+            data = request.args.to_dict()
+        
+        app.logger.info(f'Search request received with data: {data}')
+        
+        # Validate and sanitize input
+        try:
+            validated_data = validate_search_params(data)
+        except ValueError as e:
+            log_security_event('VALIDATION_ERROR', str(e))
+            return jsonify({'success': False, 'error': str(e)}), 400
+        
+        db = get_db()
+        
+        lat = validated_data.get('lat')
+        lng = validated_data.get('lng')
+        city = validated_data.get('city')
+        zipcode = validated_data.get('zipcode')
+        name = validated_data.get('name')
+        limit = validated_data.get('limit', 10)
+        
+        # Location-based search
+        if lat is not None and lng is not None:
+            app.logger.info(f'Performing location-based search at ({lat}, {lng})')
+            
+            cursor = db.cursor()
+            cursor.execute('SELECT * FROM golfcourse')
+            all_courses = cursor.fetchall()
+            
+            # Calculate distances
+            courses_with_distance = []
+            for course in all_courses:
+                course_lat = get_row_value(course, 8)
+                course_lng = get_row_value(course, 9)
+                
+                if course_lat and course_lng:
+                    try:
+                        distance = calculate_distance(lat, lng, float(course_lat), float(course_lng))
+                        course_dict = course_to_dict(course)
+                        course_dict['distance'] = round(distance, 2)
+                        courses_with_distance.append(course_dict)
+                    except (ValueError, TypeError):
+                        continue
+            
+            # Sort by distance and limit
+            courses_with_distance.sort(key=lambda x: x['distance'])
+            results = courses_with_distance[:limit]
+            
+            app.logger.info(f'Location search completed - Found {len(results)} courses')
+            
+            return jsonify({
+                'success': True,
+                'search_type': 'location',
+                'coordinates': {'lat': lat, 'lng': lng},
+                'results': results,
+                'total_found': len(results)
+            })
+        
+        # City-based search
+        elif city:
+            app.logger.info(f'Performing city-based search for: {city}')
+            
+            cursor = db.cursor()
+            cursor.execute(
+                'SELECT * FROM golfcourse WHERE LOWER(city) LIKE LOWER(%s) LIMIT %s',
+                (f'%{city}%', limit)
+            )
+            results = cursor.fetchall()
 
+            app.logger.info(f'City search completed - Found {len(results)} courses')
+            
+            return jsonify({
+                'success': True,
+                'search_type': 'city',
+                'search_term': city,
+                'results': [course_to_dict(row) for row in results],
+                'total_found': len(results)
+            })
+        
+        # Zipcode-based search
+        elif zipcode:
+            app.logger.info(f'Performing zipcode-based search for: {zipcode}')
+            
+            cursor = db.cursor()
+            cursor.execute(
+                'SELECT * FROM golfcourse WHERE address LIKE %s LIMIT %s',
+                (f'%{zipcode}%', limit)
+            )
+            results = cursor.fetchall()
+            
+            app.logger.info(f'Zipcode search completed - Found {len(results)} courses')
+            
+            return jsonify({
+                'success': True,
+                'search_type': 'zipcode',
+                'search_term': zipcode,
+                'results': [course_to_dict(row) for row in results],
+                'total_found': len(results)
+            })
+        
+        # Name-based search
+        elif name:
+            app.logger.info(f'Performing name-based search for: {name}')
+            
+            cursor = db.cursor()
+            cursor.execute(
+                'SELECT * FROM golfcourse WHERE name ILIKE %s LIMIT %s',
+                (f'%{name}%', limit)
+            )
+            results = cursor.fetchall()
+            
+            app.logger.info(f'Name search completed - Found {len(results)} courses')
+            
+            return jsonify({
+                'success': True,
+                'search_type': 'name',
+                'search_term': name,
+                'results': [course_to_dict(row) for row in results],
+                'total_found': len(results)
+            })
+        
+        else:
+            log_security_event('MISSING_PARAMS', f'Search request missing required parameters')
+            return jsonify({
+                'success': False,
+                'error': 'Please provide one of: lat/lng, city, zipcode, or name'
+            }), 400
+            
+    except Exception as e:
+        log_security_event('SEARCH_ERROR', f'Unexpected error: {str(e)}')
+        app.logger.error(f'Unexpected error in search endpoint: {str(e)}', exc_info=True)
+        return jsonify({
+            'success': False,
+            'error': 'Internal server error'
+        }), 500
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+@app.route("/health")
+@limiter.limit("2 per minute")
+def health_check():
+    """Health check endpoint for monitoring."""
+    try:
+        health_status = {
+            'status': 'healthy',
+            'timestamp': datetime.utcnow().isoformat(),
+            'databases': {
+                'golf_courses': 'connected' if golf_courses_db_available else 'disconnected',
+                'users': 'connected' if users_db_available else 'disconnected'
+            },
+            'security': {
+                'ssl_pinning': SSL_PINNING_ENABLED,
+                'rate_limiting': RATE_LIMIT_ENABLED,
+                'honeypot': HONEYPOT_ENABLED
+            }
+        }
+        
+        # Test database connections
+        if golf_courses_db_available:
+            try:
+                db = get_db()
+                cursor = db.cursor()
+                cursor.execute('SELECT 1')
+            except Exception as e:
+                health_status['databases']['golf_courses'] = 'error'
+                health_status['golf_courses_error'] = str(e)
+        
+        if users_db_available:
+            try:
+                users_db = get_users_db()
+                cursor = users_db.cursor()
+                cursor.execute('SELECT 1')
+            except Exception as e:
+                health_status['databases']['users'] = 'error'
+                health_status['users_error'] = str(e)
+        
+        # Determine overall status
+        if not golf_courses_db_available:
+            health_status['status'] = 'unhealthy'
+            health_status['error'] = 'Golf courses database unavailable'
+            return jsonify(health_status), 503
+        
+        return jsonify(health_status)
+    except Exception as e:
+        app.logger.error(f'Health check failed: {str(e)}')
+        return jsonify({
+            'status': 'unhealthy',
+            'timestamp': datetime.utcnow().isoformat(),
+            'error': str(e)
+        }), 500
 
 def course_to_dict(row):
     """Convert database row to dictionary."""
@@ -670,238 +862,235 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     
     return R * c
 
-@app.route("/")
-def root_route():
-    return redirect("https://www.dewygolf.com", code=302)
 
-@app.route("/search", methods=['GET', 'POST'])
-def search_courses():
-    """
-    Search for golf courses by various criteria:
-    - lat/lng: Find nearest courses
-    - city: Search by city name
-    - zipcode: Search by zipcode
-    - name: Search by course name
-    - limit: Number of results to return (default: 10)
-    """
-    request_id = request.headers.get('X-Request-ID', 'N/A')
-    client_ip = request.remote_addr
+# @app.route("/search", methods=['GET', 'POST'])
+# def search_courses():
+#     """
+#     Search for golf courses by various criteria:
+#     - lat/lng: Find nearest courses
+#     - city: Search by city name
+#     - zipcode: Search by zipcode
+#     - name: Search by course name
+#     - limit: Number of results to return (default: 10)
+#     """
+#     request_id = request.headers.get('X-Request-ID', 'N/A')
+#     client_ip = request.remote_addr
     
-    app.logger.info(f'Search request received - Method: {request.method}, IP: {client_ip}, Request-ID: {request_id}')
+#     app.logger.info(f'Search request received - Method: {request.method}, IP: {client_ip}, Request-ID: {request_id}')
     
-    try:
-        # Get parameters from query string or JSON body
-        if request.method == 'POST':
-            data = request.get_json() or {}
-            app.logger.info(f'POST request with JSON body: {data}')
-        else:
-            data = request.args.to_dict()
-            app.logger.info(f'GET request with query params: {data}')
+#     try:
+#         # Get parameters from query string or JSON body
+#         if request.method == 'POST':
+#             data = request.get_json() or {}
+#             app.logger.info(f'POST request with JSON body: {data}')
+#         else:
+#             data = request.args.to_dict()
+#             app.logger.info(f'GET request with query params: {data}')
         
-        lat = data.get('lat')
-        lng = data.get('lng')
-        city = data.get('city')
-        zipcode = data.get('zipcode')
-        name = data.get('name')
-        limit = int(data.get('limit', 10))
+#         lat = data.get('lat')
+#         lng = data.get('lng')
+#         city = data.get('city')
+#         zipcode = data.get('zipcode')
+#         name = data.get('name')
+#         limit = int(data.get('limit', 10))
         
-        app.logger.info(f'Search parameters - lat: {lat}, lng: {lng}, city: {city}, zipcode: {zipcode}, name: {name}, limit: {limit}')
+#         app.logger.info(f'Search parameters - lat: {lat}, lng: {lng}, city: {city}, zipcode: {zipcode}, name: {name}, limit: {limit}')
         
-        db = get_db()
+#         db = get_db()
         
-        # Search by latitude/longitude (nearest courses)
-        if lat and lng:
-            try:
-                lat = float(lat)
-                lng = float(lng)
+#         # Search by latitude/longitude (nearest courses)
+#         if lat and lng:
+#             try:
+#                 lat = float(lat)
+#                 lng = float(lng)
                 
-                app.logger.info(f'Performing location-based search at coordinates: ({lat}, {lng})')
+#                 app.logger.info(f'Performing location-based search at coordinates: ({lat}, {lng})')
                 
-                # Get all courses and calculate distances
-                app.logger.info('Querying database for all golf courses')
+#                 # Get all courses and calculate distances
+#                 app.logger.info('Querying database for all golf courses')
                 
-                courses = db.run('SELECT * FROM golfcourse')
+#                 courses = db.run('SELECT * FROM golfcourse')
                 
-                app.logger.info(f'Retrieved {len(courses)} courses from database')
+#                 app.logger.info(f'Retrieved {len(courses)} courses from database')
                 
-                courses_with_distance = []
+#                 courses_with_distance = []
                 
-                for course in courses:
-                    course_lat = float(get_row_value(course, 2))
-                    course_lng = float(get_row_value(course, 3))
+#                 for course in courses:
+#                     course_lat = float(get_row_value(course, 2))
+#                     course_lng = float(get_row_value(course, 3))
                     
-                    distance = calculate_distance(lat, lng, course_lat, course_lng)
-                    course_dict = course_to_dict(course)
-                    course_dict['distance_miles'] = round(distance, 2)
-                    courses_with_distance.append(course_dict)
+#                     distance = calculate_distance(lat, lng, course_lat, course_lng)
+#                     course_dict = course_to_dict(course)
+#                     course_dict['distance_miles'] = round(distance, 2)
+#                     courses_with_distance.append(course_dict)
                 
-                # Sort by distance and limit results
-                courses_with_distance.sort(key=lambda x: x['distance_miles'])
-                results = courses_with_distance[:limit]
+#                 # Sort by distance and limit results
+#                 courses_with_distance.sort(key=lambda x: x['distance_miles'])
+#                 results = courses_with_distance[:limit]
                 
-                app.logger.info(f'Location search completed - Found {len(results)} courses within search criteria')
-                if results:
-                    app.logger.info(f'Nearest course: {results[0]["name"]} at {results[0]["distance_miles"]} miles')
+#                 app.logger.info(f'Location search completed - Found {len(results)} courses within search criteria')
+#                 if results:
+#                     app.logger.info(f'Nearest course: {results[0]["name"]} at {results[0]["distance_miles"]} miles')
                 
-                return jsonify({
-                    'success': True,
-                    'search_type': 'location',
-                    'coordinates': {'lat': lat, 'lng': lng},
-                    'results': results,
-                    'total_found': len(results)
-                })
+#                 return jsonify({
+#                     'success': True,
+#                     'search_type': 'location',
+#                     'coordinates': {'lat': lat, 'lng': lng},
+#                     'results': results,
+#                     'total_found': len(results)
+#                 })
                 
-            except ValueError as ve:
-                app.logger.error(f'Invalid coordinate values - lat: {lat}, lng: {lng}, error: {str(ve)}')
-                return jsonify({
-                    'success': False,
-                    'error': 'Invalid latitude or longitude values'
-                }), 400
+#             except ValueError as ve:
+#                 app.logger.error(f'Invalid coordinate values - lat: {lat}, lng: {lng}, error: {str(ve)}')
+#                 return jsonify({
+#                     'success': False,
+#                     'error': 'Invalid latitude or longitude values'
+#                 }), 400
         
-        # Search by city name
-        elif city:
-            app.logger.info(f'Performing city-based search for: {city}')
+#         # Search by city name
+#         elif city:
+#             app.logger.info(f'Performing city-based search for: {city}')
             
-            results = db.run(
-                'SELECT * FROM golfcourse WHERE address ILIKE :pattern OR name ILIKE :pattern LIMIT :limit',
-                pattern=f'%{city}%',
-                limit=limit
-            )
+#             results = db.run(
+#                 'SELECT * FROM golfcourse WHERE address ILIKE :pattern OR name ILIKE :pattern LIMIT :limit',
+#                 pattern=f'%{city}%',
+#                 limit=limit
+#             )
             
-            app.logger.info(f'City search completed - Found {len(results)} courses matching "{city}"')
-            if results:
-                sample_names = [get_row_value(row, 1) for row in results[:3]]
-                app.logger.info(f'Sample results: {sample_names}')
+#             app.logger.info(f'City search completed - Found {len(results)} courses matching "{city}"')
+#             if results:
+#                 sample_names = [get_row_value(row, 1) for row in results[:3]]
+#                 app.logger.info(f'Sample results: {sample_names}')
             
-            return jsonify({
-                'success': True,
-                'search_type': 'city',
-                'search_term': city,
-                'results': [course_to_dict(row) for row in results],
-                'total_found': len(results)
-            })
+#             return jsonify({
+#                 'success': True,
+#                 'search_type': 'city',
+#                 'search_term': city,
+#                 'results': [course_to_dict(row) for row in results],
+#                 'total_found': len(results)
+#             })
         
-        # Search by zipcode
-        elif zipcode:
-            app.logger.info(f'Performing zipcode-based search for: {zipcode}')
+#         # Search by zipcode
+#         elif zipcode:
+#             app.logger.info(f'Performing zipcode-based search for: {zipcode}')
             
-            results = db.run(
-                'SELECT * FROM golfcourse WHERE address ILIKE :pattern LIMIT :limit',
-                pattern=f'%{zipcode}%',
-                limit=limit
-            )
+#             results = db.run(
+#                 'SELECT * FROM golfcourse WHERE address ILIKE :pattern LIMIT :limit',
+#                 pattern=f'%{zipcode}%',
+#                 limit=limit
+#             )
             
-            app.logger.info(f'Zipcode search completed - Found {len(results)} courses matching "{zipcode}"')
-            if results:
-                sample_names = [get_row_value(row, 1) for row in results[:3]]
-                app.logger.info(f'Sample results: {sample_names}')
+#             app.logger.info(f'Zipcode search completed - Found {len(results)} courses matching "{zipcode}"')
+#             if results:
+#                 sample_names = [get_row_value(row, 1) for row in results[:3]]
+#                 app.logger.info(f'Sample results: {sample_names}')
             
-            return jsonify({
-                'success': True,
-                'search_type': 'zipcode',
-                'search_term': zipcode,
-                'results': [course_to_dict(row) for row in results],
-                'total_found': len(results)
-            })
+#             return jsonify({
+#                 'success': True,
+#                 'search_type': 'zipcode',
+#                 'search_term': zipcode,
+#                 'results': [course_to_dict(row) for row in results],
+#                 'total_found': len(results)
+#             })
         
-        # Search by course name
-        elif name:
-            app.logger.info(f'Performing name-based search for: {name}')
+#         # Search by course name
+#         elif name:
+#             app.logger.info(f'Performing name-based search for: {name}')
             
-            results = db.run(
-                'SELECT * FROM golfcourse WHERE name ILIKE :pattern LIMIT :limit',
-                pattern=f'%{name}%',
-                limit=limit
-            )
+#             results = db.run(
+#                 'SELECT * FROM golfcourse WHERE name ILIKE :pattern LIMIT :limit',
+#                 pattern=f'%{name}%',
+#                 limit=limit
+#             )
             
-            app.logger.info(f'Name search completed - Found {len(results)} courses matching "{name}"')
-            if results:
-                sample_names = [get_row_value(row, 1) for row in results[:3]]
-                app.logger.info(f'Sample results: {sample_names}')
+#             app.logger.info(f'Name search completed - Found {len(results)} courses matching "{name}"')
+#             if results:
+#                 sample_names = [get_row_value(row, 1) for row in results[:3]]
+#                 app.logger.info(f'Sample results: {sample_names}')
             
-            return jsonify({
-                'success': True,
-                'search_type': 'name',
-                'search_term': name,
-                'results': [course_to_dict(row) for row in results],
-                'total_found': len(results)
-            })
+#             return jsonify({
+#                 'success': True,
+#                 'search_type': 'name',
+#                 'search_term': name,
+#                 'results': [course_to_dict(row) for row in results],
+#                 'total_found': len(results)
+#             })
         
-        else:
-            app.logger.warning(f'Search request missing required parameters - Provided data: {data}')
-            return jsonify({
-                'success': False,
-                'error': 'Please provide one of: lat/lng, city, zipcode, or name'
-            }), 400
+#         else:
+#             app.logger.warning(f'Search request missing required parameters - Provided data: {data}')
+#             return jsonify({
+#                 'success': False,
+#                 'error': 'Please provide one of: lat/lng, city, zipcode, or name'
+#             }), 400
             
-    except Exception as e:
-        app.logger.error(f'Unexpected error in search endpoint: {str(e)}', exc_info=True)
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+#     except Exception as e:
+#         app.logger.error(f'Unexpected error in search endpoint: {str(e)}', exc_info=True)
+#         return jsonify({
+#             'success': False,
+#             'error': str(e)
+#         }), 500
 
-@app.route("/authenticate", methods=['GET', 'POST'])
-def authenticate():
-    """
-    Recieve user information or create a new user
-    """
-    request_id = request.headers.get('X-Request-ID', 'N/A')
-    client_ip = request.remote_addr
+# @app.route("/authenticate", methods=['GET', 'POST'])
+# def authenticate():
+#     """
+#     Recieve user information or create a new user
+#     """
+#     request_id = request.headers.get('X-Request-ID', 'N/A')
+#     client_ip = request.remote_addr
     
-    app.logger.info(f'Authenticate request received - Method: {request.method}, IP: {client_ip}, Request-ID: {request_id}')
+#     app.logger.info(f'Authenticate request received - Method: {request.method}, IP: {client_ip}, Request-ID: {request_id}')
     
-    try:
-        # Get parameters from query string or JSON body
-        if request.method == 'POST':
-            data = request.get_json() or {}
-            app.logger.info(f'POST request with JSON body: {data}')
-        else:
-            data = request.args.to_dict()
-            app.logger.info(f'GET request with query params: {data}')
+#     try:
+#         # Get parameters from query string or JSON body
+#         if request.method == 'POST':
+#             data = request.get_json() or {}
+#             app.logger.info(f'POST request with JSON body: {data}')
+#         else:
+#             data = request.args.to_dict()
+#             app.logger.info(f'GET request with query params: {data}')
 
-        apiKey = data.get('apiKey')
-        limit = int(data.get('limit', 1))
+#         apiKey = data.get('apiKey')
+#         limit = int(data.get('limit', 1))
         
-        app.logger.info(f'apiKey parameters - apiKey {apiKey}')
+#         app.logger.info(f'apiKey parameters - apiKey {apiKey}')
         
-        db = get_db()
+#         db = get_db()
 
-        if apiKey:
-            app.logger.info(f'Performing apiKey search for: {apiKey}')
+#         if apiKey:
+#             app.logger.info(f'Performing apiKey search for: {apiKey}')
             
-            results = db.run(
-                'SELECT * FROM users WHERE uuid ILIKE :pattern LIMIT :limit',
-                pattern=f'%{apiKey}%',
-                limit=limit
-            )
+#             results = db.run(
+#                 'SELECT * FROM users WHERE uuid ILIKE :pattern LIMIT :limit',
+#                 pattern=f'%{apiKey}%',
+#                 limit=limit
+#             )
             
-            app.logger.info(f'apiKey search completed - Found {len(results)} users matching "{apiKey}"')
-            if results:
-                sample_names = [get_row_value(row, 1) for row in results[:3]]
-                app.logger.info(f'Sample results: {sample_names}')
+#             app.logger.info(f'apiKey search completed - Found {len(results)} users matching "{apiKey}"')
+#             if results:
+#                 sample_names = [get_row_value(row, 1) for row in results[:3]]
+#                 app.logger.info(f'Sample results: {sample_names}')
             
-            return jsonify({
-                'success': True,
-                'search_type': 'apiKey',
-                'search_term': apiKey,
-                'results': [user_to_dict(row) for row in results],
-                'total_found': len(results)
-            })
+#             return jsonify({
+#                 'success': True,
+#                 'search_type': 'apiKey',
+#                 'search_term': apiKey,
+#                 'results': [user_to_dict(row) for row in results],
+#                 'total_found': len(results)
+#             })
         
-        else:
-            app.logger.warning(f'Authenticate request missing required parameters - Provided data: {data}')
-            return jsonify({
-                'success': False,
-                'error': 'Please provide an apiKey'
-            }), 400
+#         else:
+#             app.logger.warning(f'Authenticate request missing required parameters - Provided data: {data}')
+#             return jsonify({
+#                 'success': False,
+#                 'error': 'Please provide an apiKey'
+#             }), 400
             
-    except Exception as e:
-        app.logger.error(f'Unexpected error in search endpoint: {str(e)}', exc_info=True)
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+#     except Exception as e:
+#         app.logger.error(f'Unexpected error in search endpoint: {str(e)}', exc_info=True)
+#         return jsonify({
+#             'success': False,
+#             'error': str(e)
+#         }), 500
 
 
 
