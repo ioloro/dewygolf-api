@@ -668,7 +668,6 @@ def search():
         if lat is not None and lng is not None:
             app.logger.info(f"Performing location-based search near ({lat}, {lng})")
 
-            # Pre-filter within ~0.5° bounding box (improves performance)
             lat_min, lat_max = lat - 0.5, lat + 0.5
             lng_min, lng_max = lng - 0.5, lng + 0.5
 
@@ -683,10 +682,9 @@ def search():
                 lng_min=lng_min,
                 lng_max=lng_max
             )
-            nearby_courses = rows
 
             courses_with_distance = []
-            for course in nearby_courses:
+            for course in rows:
                 try:
                     course_lat = float(get_row_value(course, 2))
                     course_lng = float(get_row_value(course, 3))
@@ -709,6 +707,7 @@ def search():
                 'results': results,
                 'total_found': len(results)
             })
+
         # ===============================================================
         # 2. City-based search
         # ===============================================================
@@ -717,10 +716,11 @@ def search():
             rows = db.run(
                 '''
                 SELECT * FROM golfcourse
-                WHERE LOWER(address) LIKE LOWER(%s)
-                LIMIT %s
+                WHERE LOWER(address) LIKE LOWER(:city)
+                LIMIT :limit
                 ''',
-                (f'%{city}%', limit)
+                city=f"%{city}%",
+                limit=limit
             )
             results = [course_to_dict(r) for r in rows]
 
@@ -742,10 +742,11 @@ def search():
             rows = db.run(
                 '''
                 SELECT * FROM golfcourse
-                WHERE address LIKE %s
-                LIMIT %s
+                WHERE address LIKE :zipcode
+                LIMIT :limit
                 ''',
-                (f'%{zipcode}%', limit)
+                zipcode=f"%{zipcode}%",
+                limit=limit
             )
             results = [course_to_dict(r) for r in rows]
 
@@ -767,10 +768,11 @@ def search():
             rows = db.run(
                 '''
                 SELECT * FROM golfcourse
-                WHERE LOWER(name) LIKE LOWER(%s)
-                LIMIT %s
+                WHERE LOWER(name) LIKE LOWER(:name)
+                LIMIT :limit
                 ''',
-                (f'%{name}%', limit)
+                name=f"%{name}%",
+                limit=limit
             )
             results = [course_to_dict(r) for r in rows]
 
@@ -794,6 +796,7 @@ def search():
             db.close()
         except Exception:
             pass
+
 
 # ============================================================================
 # DB CONNECTIONS
