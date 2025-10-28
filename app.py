@@ -641,7 +641,6 @@ def search():
             return jsonify({'success': False, 'error': str(e)}), 400
 
         db = get_db()
-        cursor = db.cursor()
 
         lat = validated.get('lat')
         lng = validated.get('lng')
@@ -676,12 +675,15 @@ def search():
             rows = db.run(
                 '''
                 SELECT * FROM golfcourse
-                WHERE latitude BETWEEN %s AND %s
-                  AND longitude BETWEEN %s AND %s
+                WHERE latitude BETWEEN :lat_min AND :lat_max
+                  AND longitude BETWEEN :lng_min AND :lng_max
                 ''',
-                (lat_min, lat_max, lng_min, lng_max)
+                lat_min=lat_min,
+                lat_max=lat_max,
+                lng_min=lng_min,
+                lng_max=lng_max
             )
-            nearby_courses = cursor.fetchall()
+            nearby_courses = rows
 
             courses_with_distance = []
             for course in nearby_courses:
@@ -707,7 +709,6 @@ def search():
                 'results': results,
                 'total_found': len(results)
             })
-
         # ===============================================================
         # 2. City-based search
         # ===============================================================
@@ -738,7 +739,6 @@ def search():
         # ===============================================================
         if zipcode:
             app.logger.info(f"Performing zipcode-based search for: {zipcode}")
-            app.logger.warning(f"get_db() returned: {type(db)} with attributes: {dir(db)}; cursor is a {type(cursor)}")
             rows = db.run(
                 '''
                 SELECT * FROM golfcourse
