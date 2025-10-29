@@ -565,7 +565,8 @@ def course_to_dict(row):
         return dict(row)
     
     # pg8000 returns list of tuples with column names
-    # Assuming columns are: id, name, latitude, longitude, address, website, phone, timezone
+    # Columns: id, name, latitude, longitude, address, website, phone, timezone, 
+    #          rating, reviewCount, courseType, amenities, priceRange, imageURL
     if isinstance(row, (list, tuple)):
         return {
             'id': row[0],
@@ -575,7 +576,13 @@ def course_to_dict(row):
             'address': row[4],
             'website': row[5],
             'phone': row[6],
-            'timezone': row[7]
+            'timezone': row[7],
+            'rating': row[8] if len(row) > 8 else None,
+            'reviewCount': row[9] if len(row) > 9 else None,
+            'courseType': row[10] if len(row) > 10 else None,
+            'amenities': row[11] if len(row) > 11 else None,
+            'priceRange': row[12] if len(row) > 12 else None,
+            'imageURL': row[13] if len(row) > 13 else None
         }
     else:
         # If it's a dict-like object
@@ -588,6 +595,12 @@ def course_to_dict(row):
             'website': row[5],
             'phone': row[6],
             'timezone': row[7],
+            'rating': row[8] if len(row) > 8 else None,
+            'reviewCount': row[9] if len(row) > 9 else None,
+            'courseType': row[10] if len(row) > 10 else None,
+            'amenities': row[11] if len(row) > 11 else None,
+            'priceRange': row[12] if len(row) > 12 else None,
+            'imageURL': row[13] if len(row) > 13 else None
         }
 
 def user_to_dict(row):
@@ -1240,7 +1253,13 @@ def init_db():
                     address TEXT,
                     website TEXT,
                     phone TEXT,
-                    timezone TEXT
+                    timezone TEXT,
+                    rating INTEGER DEFAULT -1,
+                    "reviewCount" INTEGER,
+                    "courseType" TEXT,
+                    amenities TEXT,
+                    "priceRange" TEXT,
+                    "imageURL" TEXT
                 )
             ''')
 
