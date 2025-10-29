@@ -210,7 +210,7 @@ def verify_api_key_rate_limit(apiKey):
             'SELECT request_count, last_reset, role FROM users WHERE "apiKey" = :apiKey',
             apiKey=apiKey
             )
-        
+
         user_data = result[0] if result else None
         
         if not user_data:
@@ -801,6 +801,393 @@ def search():
         try:
             db.close()
         except Exception:
+            pass
+
+# ============================================================================
+# GOLF ROUNDS ENDPOINTS
+# ============================================================================
+
+@app.route("/round", methods=['GET', 'POST'])
+@require_api_key
+@limiter.limit("10 per minute")
+def round_endpoint():
+    """
+    Handle golf rounds - create new rounds or query existing ones.
+    
+    POST: Create a new round with hole-by-hole data
+    GET: Query rounds by user, course, or round ID
+    """
+    db = get_db()
+    
+    try:
+        # ===============================================================
+        # POST - Create new round
+        # ===============================================================
+        if request.method == 'POST':
+            data = request.get_json()
+            
+            if not data:
+                return jsonify({'success': False, 'error': 'No data provided'}), 400
+            
+            # Validate required fields
+            player_id = data.get('playerID')
+            course_id = data.get('courseID')
+            holes_data = data.get('holes', [])
+            
+            if not player_id:
+                return jsonify({'success': False, 'error': 'playerID is required'}), 400
+            if not course_id:
+                return jsonify({'success': False, 'error': 'courseID is required'}), 400
+            if not holes_data:
+                return jsonify({'success': False, 'error': 'holes array is required'}), 400
+            
+            # Verify player exists and matches API key
+            player_check = db.run(
+                'SELECT id, "apiKey" FROM users WHERE id = :player_id',
+                player_id=player_id
+            )
+            
+            if not player_check:
+                return jsonify({'success': False, 'error': 'Player not found'}), 404
+            
+            # Security check: ensure player can only create rounds for themselves
+            player_api_key = player_check[0][1] if isinstance(player_check[0], (list, tuple)) else player_check[0]['apiKey']
+            if player_api_key != g.apiKey:
+                log_security_event('UNAUTHORIZED_ROUND_CREATE', 
+                    f'Attempt to create round for different user: player_id={player_id}')
+                return jsonify({'success': False, 'error': 'Unauthorized: Cannot create rounds for other players'}), 403
+            
+            # Verify course exists
+            course_check = db.run(
+                'SELECT id FROM golfcourse WHERE id = :course_id',
+                course_id=course_id
+            )
+            
+            if not course_check:
+                return jsonify({'success': False, 'error': 'Course not found'}), 404
+            
+            # Calculate total score
+            total_score = sum(hole.get('score', 0) for hole in holes_data if hole.get('score'))
+            
+            # Get timestamp
+            round_timestamp = data.get('roundStartTimestamp')
+            if not round_timestamp:
+                round_timestamp = datetime.utcnow().isoformat()
+            
+            # Insert round
+            round_result = db.run(
+                '''INSERT INTO "golfRounds" ("playerID", "courseID", "roundStartTimestamp", "totalScore")
+                   VALUES (:player_id, :course_id, :timestamp, :total_score)
+                   RETURNING id''',
+                player_id=player_id,
+                course_id=course_id,
+                timestamp=round_timestamp,
+                total_score=total_score
+            )
+            
+            round_id = round_result[0][0] if round_result else None
+            
+            if not round_id:
+                return jsonify({'success': False, 'error': 'Failed to create round'}), 500
+            
+            app.logger.info(f'Created new round: round_id={round_id}, player_id={player_id}, course_id={course_id}')
+            
+            # Insert hole-by-hole data
+            holes_inserted = 0
+            for hole_data in holes_data:
+                hole_id = hole_data.get('holeID')
+                score = hole_data.get('score')
+                
+                if not hole_id:
+                    app.logger.warning(f'Skipping hole without holeID in round {round_id}')
+                    continue
+                
+                # Verify hole exists and belongs to the course
+                hole_check = db.run(
+                    'SELECT id FROM "golfHoles" WHERE id = :hole_id AND "courseID" = :course_id',
+                    hole_id=hole_id,
+                    course_id=course_id
+                )
+                
+                if not hole_check:
+                    app.logger.warning(f'Hole {hole_id} not found or does not belong to course {course_id}')
+                    continue
+                
+                # Prepare optional fields
+                path_geojson = hole_data.get('pathGeoJSON')
+                samples = hole_data.get('samples')
+                fairway_hit = hole_data.get('fairwayHit')
+                putts = hole_data.get('putts')
+                penalty_strokes = hole_data.get('penaltyStrokes')
+                
+                # Convert GeoJSON to string if it's a dict
+                if isinstance(path_geojson, dict):
+                    import json
+                    path_geojson = json.dumps(path_geojson)
+                
+                db.run(
+                    '''INSERT INTO "golfRoundsHoles" 
+                       ("roundID", "holeID", score, "pathGeoJSON", samples, "fairwayHit", putts, "penaltyStrokes")
+                       VALUES (:round_id, :hole_id, :score, :path_geojson, :samples, :fairway_hit, :putts, :penalty_strokes)''',
+                    round_id=round_id,
+                    hole_id=hole_id,
+                    score=score,
+                    path_geojson=path_geojson,
+                    samples=samples,
+                    fairway_hit=fairway_hit,
+                    putts=putts,
+                    penalty_strokes=penalty_strokes
+                )
+                holes_inserted += 1
+            
+            app.logger.info(f'Inserted {holes_inserted} holes for round {round_id}')
+            
+            # Update user's single game count
+            db.run(
+                'UPDATE users SET "singleGameCount" = "singleGameCount" + 1 WHERE id = :player_id',
+                player_id=player_id
+            )
+            
+            return jsonify({
+                'success': True,
+                'round_id': round_id,
+                'holes_saved': holes_inserted,
+                'total_score': total_score
+            }), 201
+        
+        # ===============================================================
+        # GET - Query rounds
+        # ===============================================================
+        else:  # GET
+            round_id = request.args.get('roundID')
+            player_id = request.args.get('playerID')
+            course_id = request.args.get('courseID')
+            limit = int(request.args.get('limit', 50))
+            
+            # Ensure at least one query parameter
+            if not any([round_id, player_id, course_id]):
+                return jsonify({
+                    'success': False,
+                    'error': 'Please provide at least one query parameter: roundID, playerID, or courseID'
+                }), 400
+            
+            # Build query based on parameters
+            if round_id:
+                # Query specific round
+                rounds = db.run(
+                    '''SELECT r.id, r."playerID", r."courseID", r."roundStartTimestamp", r."totalScore",
+                              u."displayName" as player_name,
+                              c.name as course_name
+                       FROM "golfRounds" r
+                       JOIN users u ON r."playerID" = u.id
+                       JOIN golfcourse c ON r."courseID" = c.id
+                       WHERE r.id = :round_id''',
+                    round_id=round_id
+                )
+            elif player_id:
+                # Query by player
+                rounds = db.run(
+                    '''SELECT r.id, r."playerID", r."courseID", r."roundStartTimestamp", r."totalScore",
+                              u."displayName" as player_name,
+                              c.name as course_name
+                       FROM "golfRounds" r
+                       JOIN users u ON r."playerID" = u.id
+                       JOIN golfcourse c ON r."courseID" = c.id
+                       WHERE r."playerID" = :player_id
+                       ORDER BY r."roundStartTimestamp" DESC
+                       LIMIT :limit''',
+                    player_id=player_id,
+                    limit=limit
+                )
+            else:  # course_id
+                # Query by course
+                rounds = db.run(
+                    '''SELECT r.id, r."playerID", r."courseID", r."roundStartTimestamp", r."totalScore",
+                              u."displayName" as player_name,
+                              c.name as course_name
+                       FROM "golfRounds" r
+                       JOIN users u ON r."playerID" = u.id
+                       JOIN golfcourse c ON r."courseID" = c.id
+                       WHERE r."courseID" = :course_id
+                       ORDER BY r."roundStartTimestamp" DESC
+                       LIMIT :limit''',
+                    course_id=course_id,
+                    limit=limit
+                )
+            
+            if not rounds:
+                return jsonify({
+                    'success': True,
+                    'rounds': [],
+                    'total_found': 0
+                })
+            
+            # Convert rounds to dictionaries and fetch hole data
+            results = []
+            for round_row in rounds:
+                round_dict = {
+                    'id': round_row[0],
+                    'playerID': round_row[1],
+                    'courseID': round_row[2],
+                    'roundStartTimestamp': round_row[3],
+                    'totalScore': round_row[4],
+                    'playerName': round_row[5],
+                    'courseName': round_row[6]
+                }
+                
+                # Fetch hole-by-hole data for this round
+                holes = db.run(
+                    '''SELECT rh.id, rh."holeID", rh.score, rh."pathGeoJSON", rh.samples,
+                              rh."fairwayHit", rh.putts, rh."penaltyStrokes",
+                              h."holeNumber", h.par, h.distance
+                       FROM "golfRoundsHoles" rh
+                       JOIN "golfHoles" h ON rh."holeID" = h.id
+                       WHERE rh."roundID" = :round_id
+                       ORDER BY h."holeNumber"''',
+                    round_id=round_dict['id']
+                )
+                
+                round_dict['holes'] = []
+                for hole_row in holes:
+                    hole_dict = {
+                        'id': hole_row[0],
+                        'holeID': hole_row[1],
+                        'score': hole_row[2],
+                        'pathGeoJSON': hole_row[3],
+                        'samples': hole_row[4],
+                        'fairwayHit': hole_row[5],
+                        'putts': hole_row[6],
+                        'penaltyStrokes': hole_row[7],
+                        'holeNumber': hole_row[8],
+                        'par': hole_row[9],
+                        'distance': hole_row[10]
+                    }
+                    round_dict['holes'].append(hole_dict)
+                
+                results.append(round_dict)
+            
+            return jsonify({
+                'success': True,
+                'rounds': results,
+                'total_found': len(results)
+            })
+    
+    except Exception as e:
+        app.logger.error(f'Error in round endpoint: {str(e)}', exc_info=True)
+        return jsonify({'success': False, 'error': 'Internal server error'}), 500
+    finally:
+        try:
+            db.close()
+        except:
+            pass
+
+
+# ============================================================================
+# GOLF COURSE DETAILS ENDPOINT
+# ============================================================================
+
+@app.route("/course", methods=['GET'])
+@require_api_key
+@limiter.limit("10 per minute")
+def course_details():
+    """
+    Get detailed course information including holes, greens, and hazards.
+    
+    Query parameters:
+    - courseID: ID of the course to retrieve
+    """
+    db = get_db()
+    
+    try:
+        course_id = request.args.get('courseID')
+        
+        if not course_id:
+            return jsonify({
+                'success': False,
+                'error': 'courseID parameter is required'
+            }), 400
+        
+        # Get course basic info
+        course_rows = db.run(
+            'SELECT * FROM golfcourse WHERE id = :course_id',
+            course_id=course_id
+        )
+        
+        if not course_rows:
+            return jsonify({
+                'success': False,
+                'error': 'Course not found'
+            }), 404
+        
+        # Convert course to dict
+        course = course_to_dict(course_rows[0])
+        
+        # Get all holes for this course
+        holes_rows = db.run(
+            '''SELECT id, "courseID", "holeNumber", par, distance, "geoJSON"
+               FROM "golfHoles"
+               WHERE "courseID" = :course_id
+               ORDER BY "holeNumber"''',
+            course_id=course_id
+        )
+        
+        course['holes'] = []
+        
+        for hole_row in holes_rows:
+            hole_dict = {
+                'id': hole_row[0],
+                'courseID': hole_row[1],
+                'holeNumber': hole_row[2],
+                'par': hole_row[3],
+                'distance': hole_row[4],
+                'geoJSON': hole_row[5]
+            }
+            
+            hole_id = hole_dict['id']
+            
+            # Get greens for this hole
+            greens_rows = db.run(
+                'SELECT id, "polygonGeoJSON" FROM greens WHERE "holeID" = :hole_id',
+                hole_id=hole_id
+            )
+            
+            hole_dict['greens'] = []
+            for green_row in greens_rows:
+                hole_dict['greens'].append({
+                    'id': green_row[0],
+                    'polygonGeoJSON': green_row[1]
+                })
+            
+            # Get hazards for this hole
+            hazards_rows = db.run(
+                'SELECT id, type, "polygonGeoJSON" FROM hazards WHERE "holeID" = :hole_id',
+                hole_id=hole_id
+            )
+            
+            hole_dict['hazards'] = []
+            for hazard_row in hazards_rows:
+                hole_dict['hazards'].append({
+                    'id': hazard_row[0],
+                    'type': hazard_row[1],
+                    'polygonGeoJSON': hazard_row[2]
+                })
+            
+            course['holes'].append(hole_dict)
+        
+        app.logger.info(f'Retrieved course details: course_id={course_id}, holes={len(course["holes"])}')
+        
+        return jsonify({
+            'success': True,
+            'course': course
+        })
+    
+    except Exception as e:
+        app.logger.error(f'Error in course details endpoint: {str(e)}', exc_info=True)
+        return jsonify({'success': False, 'error': 'Internal server error'}), 500
+    finally:
+        try:
+            db.close()
+        except:
             pass
 
 
