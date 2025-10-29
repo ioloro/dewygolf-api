@@ -207,8 +207,8 @@ def verify_api_key_rate_limit(apiKey):
         users_db = get_db()
         
         result = users_db.run(
-            'SELECT request_count, last_reset FROM users WHERE uuid = :uuid',
-            uuid=apiKey
+            'SELECT request_count, last_reset FROM users WHERE id = :id',
+            id=apiKey
         )
         user_data = result[0] if result else None
         
@@ -229,9 +229,9 @@ def verify_api_key_rate_limit(apiKey):
         # Reset counter if more than 24 hours have passed
         if datetime.utcnow() - last_reset > timedelta(hours=24):
             users_db.run(
-                'UPDATE users SET request_count = 0, last_reset = :now WHERE uuid = :uuid',
+                'UPDATE users SET request_count = 0, last_reset = :now WHERE id = :id',
                 now=datetime.utcnow(),
-                uuid=apiKey
+                id=apiKey
             )
             return True
         
@@ -253,9 +253,9 @@ def increment_api_key_usage(apiKey):
             '''UPDATE users 
                SET request_count = request_count + 1, 
                    "lastActivityDate" = :now 
-               WHERE uuid = :uuid''',
+               WHERE id = :id''',
             now=datetime.utcnow().isoformat(),
-            uuid=apiKey
+            id=apiKey
         )
     except Exception as e:
         app.logger.error(f'Error incrementing API key usage: {str(e)}')
@@ -286,8 +286,8 @@ def require_api_key(f):
             
             # Check if API key exists in database
             result = users_db.run(
-                'SELECT uuid, banned, "isActive", request_count FROM users WHERE uuid = :uuid',
-                uuid=apiKey
+                'SELECT id, banned, "isActive", request_count FROM users WHERE id = :id',
+                id=apiKey
             )
             user = result[0] if result else None
 
@@ -328,9 +328,9 @@ def require_api_key(f):
                 app.logger.info(f'New API key detected from {request.remote_addr}, creating user account')
                 
                 users_db.run(
-                    '''INSERT INTO users (uuid, banned, "isActive", "firstConnectionDate", "lastActivityDate", request_count, last_reset, "displayName", "passwordResetRequired", "dewyPremium") 
-                       VALUES (:uuid, :banned, :isActive, :firstConnectionDate, :lastActivityDate, :request_count, :last_reset, :displayName, :passwordResetRequired, :dewyPremium)''',
-                    uuid=apiKey,
+                    '''INSERT INTO users (id, banned, "isActive", "firstConnectionDate", "lastActivityDate", request_count, last_reset, "displayName", "passwordResetRequired", "dewyPremium") 
+                       VALUES (:id, :banned, :isActive, :firstConnectionDate, :lastActivityDate, :request_count, :last_reset, :displayName, :passwordResetRequired, :dewyPremium)''',
+                    id=apiKey,
                     banned=False,
                     isActive=True,
                     firstConnectionDate=datetime.utcnow().isoformat(),
@@ -527,11 +527,11 @@ def honeypot():
             try:
                 users_db = get_db()
                 users_db.run(
-                    'UPDATE users SET banned = :banned, "bannedDate" = :bannedDate, "banReason" = :banReason WHERE uuid = :uuid',
+                    'UPDATE users SET banned = :banned, "bannedDate" = :bannedDate, "banReason" = :banReason WHERE id = :id',
                     banned=True,
                     bannedDate=datetime.utcnow().isoformat(),
                     banReason='Honeypot triggered',
-                    uuid=apiKey
+                    id=apiKey
                 )
                 app.logger.warning(f'API key banned after honeypot trigger: {apiKey[:8]}...')
             except Exception as e:
@@ -570,7 +570,7 @@ def course_to_dict(row):
         return dict(row)
     
     # pg8000 returns list of tuples with column names
-    # Assuming columns are: id, name, latitude, longitude, address, website, phone, timezone, uuid
+    # Assuming columns are: id, name, latitude, longitude, address, website, phone, timezone
     if isinstance(row, (list, tuple)):
         return {
             'id': row[0],
@@ -580,8 +580,7 @@ def course_to_dict(row):
             'address': row[4],
             'website': row[5],
             'phone': row[6],
-            'timezone': row[7],
-            'uuid': row[8] if len(row) > 8 else None
+            'timezone': row[7]
         }
     else:
         # If it's a dict-like object
@@ -594,7 +593,6 @@ def course_to_dict(row):
             'website': row[5],
             'phone': row[6],
             'timezone': row[7],
-            'uuid': row[8] if len(row) > 8 else None
         }
 
 def user_to_dict(row):
@@ -603,21 +601,20 @@ def user_to_dict(row):
     if isinstance(row, (list, tuple)):
         return {
             'id': row[0],
-            'uuid': row[1] if len(row) > 1 else None,
-            'displayName': row[2] if len(row) > 2 else None,
-            'firstConnectionDate': row[3] if len(row) > 3 else None,
-            'isActive': row[4] if len(row) > 4 else None,
-            'passwordResetRequired': row[5] if len(row) > 5 else None,
-            'banned': row[6] if len(row) > 6 else None,
-            'lastActivityDate': row[7] if len(row) > 7 else None,
-            'email': row[8] if len(row) > 8 else None,
-            'bannedDate': row[9] if len(row) > 9 else None,
-            'bannedBy': row[10] if len(row) > 10 else None,
-            'banReason': row[11] if len(row) > 11 else None,
-            'role': row[12] if len(row) > 12 else None,
-            'dewyPremium': row[13] if len(row) > 13 else None,
-            'dewyPremiumExpiration': row[14] if len(row) > 14 else None,
-            'singleGameCount': row[15] if len(row) > 15 else None
+            'displayName': row[1] if len(row) > 2 else None,
+            'firstConnectionDate': row[2] if len(row) > 3 else None,
+            'isActive': row[3] if len(row) > 4 else None,
+            'passwordResetRequired': row[4] if len(row) > 5 else None,
+            'banned': row[5] if len(row) > 6 else None,
+            'lastActivityDate': row[6] if len(row) > 7 else None,
+            'email': row[7] if len(row) > 8 else None,
+            'bannedDate': row[8] if len(row) > 9 else None,
+            'bannedBy': row[9] if len(row) > 10 else None,
+            'banReason': row[10] if len(row) > 11 else None,
+            'role': row[11] if len(row) > 12 else None,
+            'dewyPremium': row[12] if len(row) > 13 else None,
+            'dewyPremiumExpiration': row[13] if len(row) > 14 else None,
+            'singleGameCount': row[14] if len(row) > 15 else None
         }
     else:
         # If it's a dict-like object
@@ -853,38 +850,36 @@ def init_db():
             
             conn.run('''
                 CREATE TABLE IF NOT EXISTS golfcourse (
-                    id SERIAL PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    latitude REAL NOT NULL,
-                    longitude REAL NOT NULL,
+                    id INTEGER GENERATED BY DEFAULT AS IDENTITY UNIQUE PRIMARY KEY,
+                    name TEXT,
+                    latitude NUMERIC,
+                    longitude NUMERIC,
                     address TEXT,
                     website TEXT,
                     phone TEXT,
-                    timezone TEXT,
-                    uuid TEXT DEFAULT 'constant'
+                    timezone TEXT
                 )
             ''')
 
             conn.run('''
                 CREATE TABLE IF NOT EXISTS users (
-                    id SERIAL PRIMARY KEY,
-                    uuid TEXT NOT NULL DEFAULT '',
-                    banned BOOLEAN NOT NULL DEFAULT false,
-                    "isActive" BOOLEAN NOT NULL DEFAULT true,
+                    id INTEGER GENERATED BY DEFAULT AS IDENTITY UNIQUE PRIMARY KEY,
+                    "displayName" TEXT,
                     "firstConnectionDate" TEXT,
+                    "isActive" BOOLEAN DEFAULT true,
+                    "passwordResetRequired" BOOLEAN DEFAULT false,
+                    banned BOOLEAN DEFAULT false,
                     "lastActivityDate" TEXT,
-                    request_count INTEGER DEFAULT 0,
-                    last_reset TEXT,
-                    "displayName" TEXT NOT NULL DEFAULT '',
-                    "passwordResetRequired" BOOLEAN NOT NULL DEFAULT false,
                     email TEXT,
                     "bannedDate" TEXT,
                     "bannedBy" TEXT,
                     "banReason" TEXT,
-                    role TEXT,
-                    "dewyPremium" BOOLEAN NOT NULL DEFAULT false,
+                    role TEXT DEFAULT 'golfer',
+                    "dewyPremium" BOOLEAN DEFAULT false,
                     "dewyPremiumExpiration" TEXT,
-                    "singleGameCount" INTEGER
+                    "singleGameCount" INTEGER DEFAULT 0,
+                    request_count INTEGER DEFAULT 1,
+                    last_reset TEXT
                 )
             ''')
             
