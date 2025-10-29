@@ -656,8 +656,8 @@ def search():
 
         db = get_db()
 
-        lat = validated.get('lat')
-        lng = validated.get('lng')
+        latitude = validated.get('latitude')
+        longitude = validated.get('longitude')
         city = validated.get('city')
         zipcode = validated.get('zipcode')
         name = validated.get('name')
@@ -665,7 +665,7 @@ def search():
 
         # ---- Ensure only one search type is active ----
         provided = sum([
-            bool(lat is not None and lng is not None),
+            bool(latitude is not None and longitude is not None),
             bool(city),
             bool(zipcode),
             bool(name)
@@ -673,36 +673,36 @@ def search():
         if provided != 1:
             return jsonify({
                 'success': False,
-                'error': 'Please provide exactly one search type: lat/lng, city, zipcode, or name'
+                'error': 'Please provide exactly one search type: latitude/longitude, city, zipcode, or name'
             }), 400
 
         # ===============================================================
         # 1. Location-based search
         # ===============================================================
-        if lat is not None and lng is not None:
-            app.logger.info(f"Performing location-based search near ({lat}, {lng})")
+        if latitude is not None and longitude is not None:
+            app.logger.info(f"Performing location-based search near ({latitude}, {longitude})")
 
-            lat_min, lat_max = lat - 0.5, lat + 0.5
-            lng_min, lng_max = lng - 0.5, lng + 0.5
+            latitude_min, latitude_max = latitude - 0.5, latitude + 0.5
+            longitude_min, longitude_max = longitude - 0.5, longitude + 0.5
 
             rows = db.run(
                 '''
                 SELECT * FROM golfcourse
-                WHERE latitude BETWEEN :lat_min AND :lat_max
-                  AND longitude BETWEEN :lng_min AND :lng_max
+                WHERE latitude BETWEEN :latitude_min AND :latitude_max
+                  AND longitude BETWEEN :longitude_min AND :longitude_max
                 ''',
-                lat_min=lat_min,
-                lat_max=lat_max,
-                lng_min=lng_min,
-                lng_max=lng_max
+                latitude_min=latitude_min,
+                latitude_max=latitude_max,
+                longitude_min=longitude_min,
+                longitude_max=longitude_max
             )
 
             courses_with_distance = []
             for course in rows:
                 try:
-                    course_lat = float(get_row_value(course, 2))
-                    course_lng = float(get_row_value(course, 3))
-                    distance = calculate_distance(lat, lng, course_lat, course_lng)
+                    course_latitude = float(get_row_value(course, 2))
+                    course_longitude = float(get_row_value(course, 3))
+                    distance = calculate_distance(latitude, longitude, course_latitude, course_longitude)
                     course_dict = course_to_dict(course)
                     course_dict['distance'] = round(distance, 2)
                     courses_with_distance.append(course_dict)
@@ -717,7 +717,7 @@ def search():
             return jsonify({
                 'success': True,
                 'search_type': 'location',
-                'coordinates': {'lat': lat, 'lng': lng},
+                'coordinates': {'latitude': latitude, 'longitude': longitude},
                 'results': results,
                 'total_found': len(results)
             })
