@@ -207,9 +207,10 @@ def verify_api_key_rate_limit(apiKey):
         users_db = get_db()
         
         result = users_db.run(
-            'SELECT request_count, last_reset FROM users WHERE id = :id',
-            id=apiKey
-        )
+            'SELECT request_count, last_reset, role FROM users WHERE "apiKey" = :apiKey',
+            apiKey=apiKey
+            )
+        
         user_data = result[0] if result else None
         
         if not user_data:
@@ -253,9 +254,9 @@ def increment_api_key_usage(apiKey):
             '''UPDATE users 
                SET request_count = request_count + 1, 
                    "lastActivityDate" = :now 
-               WHERE id = :id''',
+               WHERE "apiKey" = :apiKey''',
             now=datetime.utcnow().isoformat(),
-            id=apiKey
+            apiKey=apiKey
         )
     except Exception as e:
         app.logger.error(f'Error incrementing API key usage: {str(e)}')
@@ -286,8 +287,8 @@ def require_api_key(f):
             
             # Check if API key exists in database
             result = users_db.run(
-                'SELECT id, banned, "isActive", request_count FROM users WHERE id = :id',
-                id=apiKey
+                'SELECT id, banned, "isActive", request_count FROM users WHERE "apiKey" = :apiKey',
+                apiKey=apiKey
             )
             user = result[0] if result else None
 
@@ -328,18 +329,12 @@ def require_api_key(f):
                 app.logger.info(f'New API key detected from {request.remote_addr}, creating user account')
                 
                 users_db.run(
-                    '''INSERT INTO users (id, banned, "isActive", "firstConnectionDate", "lastActivityDate", request_count, last_reset, "displayName", "passwordResetRequired", "dewyPremium") 
-                       VALUES (:id, :banned, :isActive, :firstConnectionDate, :lastActivityDate, :request_count, :last_reset, :displayName, :passwordResetRequired, :dewyPremium)''',
-                    id=apiKey,
-                    banned=False,
-                    isActive=True,
-                    firstConnectionDate=datetime.utcnow().isoformat(),
-                    lastActivityDate=datetime.utcnow().isoformat(),
-                    request_count=1,
-                    last_reset=datetime.utcnow().isoformat(),
+                    '''INSERT INTO users ("apiKey", "displayName", "firstConnectionDate", "lastActivityDate") 
+                       VALUES (:apiKey, :displayName, :firstConnectionDate, :lastActivityDate)''',
+                    apiKey=apiKey,
                     displayName='',
-                    passwordResetRequired=False,
-                    dewyPremium=False
+                    firstConnectionDate=datetime.utcnow().isoformat(),
+                    lastActivityDate=datetime.utcnow().isoformat()
                 )
 
                 # Store API key in g
@@ -527,11 +522,11 @@ def honeypot():
             try:
                 users_db = get_db()
                 users_db.run(
-                    'UPDATE users SET banned = :banned, "bannedDate" = :bannedDate, "banReason" = :banReason WHERE id = :id',
+                    'UPDATE users SET banned = :banned, "bannedDate" = :bannedDate, "banReason" = :banReason WHERE "apiKey" = :apiKey',
                     banned=True,
                     bannedDate=datetime.utcnow().isoformat(),
                     banReason='Honeypot triggered',
-                    id=apiKey
+                    apiKey=apiKey
                 )
                 app.logger.warning(f'API key banned after honeypot trigger: {apiKey[:8]}...')
             except Exception as e:
@@ -879,7 +874,8 @@ def init_db():
                     "dewyPremiumExpiration" TEXT,
                     "singleGameCount" INTEGER DEFAULT 0,
                     request_count INTEGER DEFAULT 1,
-                    last_reset TEXT
+                    last_reset TEXT,
+                    "apiKey" TEXT
                 )
             ''')
             
