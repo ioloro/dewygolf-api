@@ -817,6 +817,173 @@ def search():
             pass
 
 # ============================================================================
+# USER MANAGEMENT ENDPOINT
+# ============================================================================
+
+@app.route("/hello", methods=['GET', 'POST', 'PUT'])
+@require_api_key
+@limiter.limit("10 per minute")
+def user_endpoint():
+    """
+    Handle user lookup and updates.
+    
+    GET: Lookup user by ID or API key
+    POST/PUT: Update user information using API key
+    """
+    db = get_db()
+    
+    try:
+        # ===============================================================
+        # GET - Lookup user
+        # ===============================================================
+        if request.method == 'GET':
+            user_id = request.args.get('userID') or request.args.get('id')
+            lookup_api_key = request.args.get('apiKey')
+            
+            # Must provide either userID or apiKey
+            if not user_id and not lookup_api_key:
+                return jsonify({
+                    'success': False,
+                    'error': 'Please provide either userID or apiKey parameter'
+                }), 400
+            
+            # Query based on provided parameter
+            if user_id:
+                users = db.run(
+                    '''SELECT id, "displayName", "firstConnectionDate", "isActive", 
+                              "passwordResetRequired", banned, "lastActivityDate", email,
+                              "bannedDate", "bannedBy", "banReason", role, "dewyPremium",
+                              "dewyPremiumExpiration", "singleGameCount"
+                       FROM users WHERE id = :user_id''',
+                    user_id=user_id
+                )
+            else:  # lookup_api_key
+                users = db.run(
+                    '''SELECT id, "displayName", "firstConnectionDate", "isActive", 
+                              "passwordResetRequired", banned, "lastActivityDate", email,
+                              "bannedDate", "bannedBy", "banReason", role, "dewyPremium",
+                              "dewyPremiumExpiration", "singleGameCount"
+                       FROM users WHERE "apiKey" = :api_key''',
+                    api_key=lookup_api_key
+                )
+            
+            if not users:
+                return jsonify({
+                    'success': False,
+                    'error': 'User not found'
+                }), 404
+            
+            user = user_to_dict(users[0])
+            
+            app.logger.info(f'User lookup successful: user_id={user.get("id")}')
+            
+            return jsonify({
+                'success': True,
+                'user': user
+            })
+        
+        # ===============================================================
+        # POST/PUT - Update user information
+        # ===============================================================
+        else:  # POST or PUT
+            data = request.get_json()
+            
+            if not data:
+                return jsonify({'success': False, 'error': 'No data provided'}), 400
+            
+            # Get the user by their API key (from the authentication)
+            user_api_key = g.apiKey
+            
+            # Verify user exists
+            user_check = db.run(
+                'SELECT id FROM users WHERE "apiKey" = :api_key',
+                api_key=user_api_key
+            )
+            
+            if not user_check:
+                return jsonify({'success': False, 'error': 'User not found'}), 404
+            
+            user_id = user_check[0][0] if isinstance(user_check[0], (list, tuple)) else user_check[0]['id']
+            
+            # Build UPDATE query dynamically based on provided fields
+            update_fields = []
+            update_params = {'user_id': user_id}
+            
+            # Define allowed fields for update
+            allowed_fields = {
+                'displayName': 'displayName',
+                'email': 'email',
+                'dewyPremium': 'dewyPremium',
+                'dewyPremiumExpiration': 'dewyPremiumExpiration'
+            }
+            
+            # Process each allowed field if present in request
+            for json_key, db_column in allowed_fields.items():
+                if json_key in data:
+                    value = data[json_key]
+                    
+                    # Sanitize string inputs
+                    if isinstance(value, str):
+                        value = sanitize_input(value)
+                    
+                    update_fields.append(f'"{db_column}" = :{json_key}')
+                    update_params[json_key] = value
+            
+            # If no valid fields to update
+            if not update_fields:
+                return jsonify({
+                    'success': False,
+                    'error': 'No valid fields provided for update',
+                    'allowed_fields': list(allowed_fields.keys())
+                }), 400
+            
+            # Always update lastActivityDate
+            update_fields.append('"lastActivityDate" = :lastActivityDate')
+            update_params['lastActivityDate'] = datetime.utcnow().isoformat()
+            
+            # Build and execute UPDATE query
+            update_query = f'''
+                UPDATE users 
+                SET {', '.join(update_fields)}
+                WHERE id = :user_id
+                RETURNING id
+            '''
+            
+            result = db.run(update_query, **update_params)
+            
+            if not result:
+                return jsonify({'success': False, 'error': 'Failed to update user'}), 500
+            
+            app.logger.info(f'User updated successfully: user_id={user_id}, fields={list(allowed_fields.keys())}')
+            
+            # Return updated user data
+            updated_user = db.run(
+                '''SELECT id, "displayName", "firstConnectionDate", "isActive", 
+                          "passwordResetRequired", banned, "lastActivityDate", email,
+                          "bannedDate", "bannedBy", "banReason", role, "dewyPremium",
+                          "dewyPremiumExpiration", "singleGameCount"
+                   FROM users WHERE id = :user_id''',
+                user_id=user_id
+            )
+            
+            user_dict = user_to_dict(updated_user[0])
+            
+            return jsonify({
+                'success': True,
+                'message': 'User updated successfully',
+                'user': user_dict
+            }), 200
+    
+    except Exception as e:
+        app.logger.error(f'Error in user endpoint: {str(e)}', exc_info=True)
+        return jsonify({'success': False, 'error': 'Internal server error'}), 500
+    finally:
+        try:
+            db.close()
+        except:
+            pass
+
+# ============================================================================
 # GOLF ROUNDS ENDPOINTS
 # ============================================================================
 
