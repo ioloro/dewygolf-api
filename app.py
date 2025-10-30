@@ -971,7 +971,7 @@ def user_endpoint():
             return jsonify({
                 'success': True,
                 'message': 'User updated successfully',
-                'user': user_dict
+                'golfer': user_dict
             }), 200
     
     except Exception as e:
