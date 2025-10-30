@@ -859,7 +859,7 @@ def round_endpoint():
                 return jsonify({'success': False, 'error': 'playerID is required'}), 400
             if not course_id:
                 return jsonify({'success': False, 'error': 'courseID is required'}), 400
-            if not holes_data:
+            if not holes_data and not is_preview: #Preview cannot/will not have holes
                 return jsonify({'success': False, 'error': 'holes array is required'}), 400
             
             # Verify player exists and matches API key
