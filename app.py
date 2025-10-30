@@ -879,7 +879,7 @@ def user_endpoint():
             
             return jsonify({
                 'success': True,
-                'user': user
+                'golfer': user
             })
         
         # ===============================================================
