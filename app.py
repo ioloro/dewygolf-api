@@ -846,6 +846,14 @@ def round_endpoint():
             player_id = data.get('playerID')
             course_id = data.get('courseID')
             holes_data = data.get('holes', [])
+            raw_samples = data.get('rawSamples')
+            is_preview = data.get('isPreview', False)
+            preview_swings = data.get('previewSwings')
+            preview_putts = data.get('previewPutts')
+            round_timestamp = data.get('roundStartTimestamp')
+            
+            if not round_timestamp:
+                round_timestamp = datetime.utcnow().isoformat()
             
             if not player_id:
                 return jsonify({'success': False, 'error': 'playerID is required'}), 400
@@ -889,21 +897,25 @@ def round_endpoint():
             
             # Insert round
             round_result = db.run(
-                '''INSERT INTO "golfRounds" ("playerID", "courseID", "roundStartTimestamp", "totalScore")
-                   VALUES (:player_id, :course_id, :timestamp, :total_score)
+                '''INSERT INTO "golfRounds" ("playerID", "courseID", "roundStartTimestamp", "totalScore", "rawSamples", "isPreview", "previewSwings", "previewPutts")
+                   VALUES (:player_id, :course_id, :timestamp, :total_score, :raw_samples, :is_preview, :preview_swings, :preview_putts)
                    RETURNING id''',
                 player_id=player_id,
                 course_id=course_id,
                 timestamp=round_timestamp,
-                total_score=total_score
+                total_score=total_score,
+                raw_samples=raw_samples,
+                is_preview=is_preview,
+                preview_swings=preview_swings,
+                preview_putts=preview_putts
             )
             
             round_id = round_result[0][0] if round_result else None
             
             if not round_id:
                 return jsonify({'success': False, 'error': 'Failed to create round'}), 500
-            
-            app.logger.info(f'Created new round: round_id={round_id}, player_id={player_id}, course_id={course_id}')
+
+            app.logger.info(f'Created new round: round_id={round_id}, player_id={player_id}, course_id={course_id}, is_preview={is_preview}')
             
             # Insert hole-by-hole data
             holes_inserted = 0
@@ -965,7 +977,8 @@ def round_endpoint():
                 'success': True,
                 'round_id': round_id,
                 'holes_saved': holes_inserted,
-                'total_score': total_score
+                'total_score': total_score,
+                'is_preview': is_preview
             }), 201
         
         # ===============================================================
