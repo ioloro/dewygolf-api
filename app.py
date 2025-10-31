@@ -217,11 +217,20 @@ def verify_api_key_rate_limit(apiKey):
         role = user_data[2] if isinstance(user_data, (tuple, list)) else user_data['role']
         
         # Parse last reset time
-        if isinstance(last_reset, str):
+        if last_reset is None:
+            # First time user - initialize last_reset to now
+            last_reset = datetime.utcnow()
+            users_db.run(
+                'UPDATE users SET last_reset = :now WHERE "apiKey" = :apiKey',
+                now=last_reset,
+                apiKey=apiKey
+            )
+        elif isinstance(last_reset, str):
             last_reset = datetime.fromisoformat(last_reset)
         
-        if role == 'johnmarc':
-            return False
+        if role == 'dewy':
+            app.logger.debug('Hello, Dewy. You do not adhere to rate limits. Come through')
+            return True
             
         # Reset counter if more than 24 hours have passed
         if datetime.utcnow() - last_reset > timedelta(hours=24):
