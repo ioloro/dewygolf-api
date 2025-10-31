@@ -193,10 +193,6 @@ setup_logging()
 # API KEY VERIFICATION AND USER MANAGEMENT
 # ============================================================================
 
-def generate_api_key():
-    """Generate a secure random API key."""
-    return secrets.token_urlsafe(32)
-
 def hash_api_key(apiKey):
     """Hash API key for secure storage comparison."""
     return hashlib.sha256(apiKey.encode()).hexdigest()
@@ -605,29 +601,33 @@ def course_to_dict(row):
 
 def user_to_dict(row):
     """Convert database row to dictionary."""
-    # pg8000 returns list of tuples with column names
     if isinstance(row, (list, tuple)):
         return {
             'id': row[0],
-            'displayName': row[1] if len(row) > 2 else None,
-            'firstConnectionDate': row[2] if len(row) > 3 else None,
-            'isActive': row[3] if len(row) > 4 else None,
-            'passwordResetRequired': row[4] if len(row) > 5 else None,
-            'banned': row[5] if len(row) > 6 else None,
-            'lastActivityDate': row[6] if len(row) > 7 else None,
-            'email': row[7] if len(row) > 8 else None,
-            'bannedDate': row[8] if len(row) > 9 else None,
-            'bannedBy': row[9] if len(row) > 10 else None,
-            'banReason': row[10] if len(row) > 11 else None,
-            'role': row[11] if len(row) > 12 else None,
-            'dewyPremium': row[12] if len(row) > 13 else None,
-            'dewyPremiumExpiration': row[13] if len(row) > 14 else None,
-            'singleGameCount': row[14] if len(row) > 15 else None
+            'displayName': row[1] if len(row) > 1 else None,
+            'firstName': row[2] if len(row) > 2 else None,
+            'lastName': row[3] if len(row) > 3 else None,
+            'email': row[4] if len(row) > 4 else None,
+            'phoneNumber': row[5] if len(row) > 5 else None,
+            'avatarURL': row[6] if len(row) > 6 else None,
+            'ghinID': row[7] if len(row) > 7 else None,
+            'handicap': row[8] if len(row) > 8 else None,
+            'homeLocation': row[9] if len(row) > 9 else None,
+            'firstConnectionDate': row[10] if len(row) > 10 else None,
+            'isActive': row[11] if len(row) > 11 else None,
+            'passwordResetRequired': row[12] if len(row) > 12 else None,
+            'banned': row[13] if len(row) > 13 else None,
+            'lastActivityDate': row[14] if len(row) > 14 else None,
+            'bannedDate': row[15] if len(row) > 15 else None,
+            'bannedBy': row[16] if len(row) > 16 else None,
+            'banReason': row[17] if len(row) > 17 else None,
+            'role': row[18] if len(row) > 18 else None,
+            'dewyPremium': row[19] if len(row) > 19 else None,
+            'dewyPremiumExpiration': row[20] if len(row) > 20 else None,
+            'singleGameCount': row[21] if len(row) > 21 else None
         }
     else:
-        # If it's a dict-like object
         return dict(row)
-
 # ============================================================================
 # API ENDPOINTS
 # ============================================================================
@@ -850,8 +850,9 @@ def user_endpoint():
             # Query based on provided parameter
             if user_id:
                 users = db.run(
-                    '''SELECT id, "displayName", "firstConnectionDate", "isActive", 
-                              "passwordResetRequired", banned, "lastActivityDate", email,
+                    '''SELECT id, "displayName", "firstName", "lastName", email, "phoneNumber",
+                              "avatarURL", "ghinID", handicap, "homeLocation", "firstConnectionDate",
+                              "isActive", "passwordResetRequired", banned, "lastActivityDate",
                               "bannedDate", "bannedBy", "banReason", role, "dewyPremium",
                               "dewyPremiumExpiration", "singleGameCount"
                        FROM users WHERE id = :user_id''',
@@ -859,14 +860,14 @@ def user_endpoint():
                 )
             else:  # lookup_api_key
                 users = db.run(
-                    '''SELECT id, "displayName", "firstConnectionDate", "isActive", 
-                              "passwordResetRequired", banned, "lastActivityDate", email,
+                    '''SELECT id, "displayName", "firstName", "lastName", email, "phoneNumber",
+                              "avatarURL", "ghinID", handicap, "homeLocation", "firstConnectionDate",
+                              "isActive", "passwordResetRequired", banned, "lastActivityDate",
                               "bannedDate", "bannedBy", "banReason", role, "dewyPremium",
                               "dewyPremiumExpiration", "singleGameCount"
                        FROM users WHERE "apiKey" = :api_key''',
                     api_key=lookup_api_key
                 )
-            
             if not users:
                 return jsonify({
                     'success': False,
@@ -912,7 +913,14 @@ def user_endpoint():
             # Define allowed fields for update
             allowed_fields = {
                 'displayName': 'displayName',
+                'firstName': 'firstName',
+                'lastName': 'lastName',
                 'email': 'email',
+                'phoneNumber': 'phoneNumber',
+                'avatarURL': 'avatarURL',
+                'ghinID': 'ghinID',
+                'handicap': 'handicap',
+                'homeLocation': 'homeLocation',
                 'dewyPremium': 'dewyPremium',
                 'dewyPremiumExpiration': 'dewyPremiumExpiration'
             }
@@ -958,8 +966,9 @@ def user_endpoint():
             
             # Return updated user data
             updated_user = db.run(
-                '''SELECT id, "displayName", "firstConnectionDate", "isActive", 
-                          "passwordResetRequired", banned, "lastActivityDate", email,
+                '''SELECT id, "displayName", "firstName", "lastName", email, "phoneNumber",
+                          "avatarURL", "ghinID", handicap, "homeLocation", "firstConnectionDate",
+                          "isActive", "passwordResetRequired", banned, "lastActivityDate",
                           "bannedDate", "bannedBy", "banReason", role, "dewyPremium",
                           "dewyPremiumExpiration", "singleGameCount"
                    FROM users WHERE id = :user_id''',
