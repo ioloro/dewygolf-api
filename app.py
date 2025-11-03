@@ -1026,6 +1026,8 @@ def round_endpoint():
             app.logger.info('POST /round - Starting round creation process')
             
             data = request.get_json()
+
+            app.logger.debug('POST /round - raw JSON: {data}')
             
             if not data:
                 app.logger.warning('POST /round - No JSON data provided in request body')
