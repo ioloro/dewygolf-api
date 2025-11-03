@@ -1117,6 +1117,14 @@ def round_endpoint():
             app.logger.debug(f'POST /round - Insert params: player_id={player_id}, course_id={course_id}, '
                            f'timestamp={round_timestamp}, total_score={total_score}, is_preview={is_preview}')
             
+            # Convert rawSamples to JSON string for JSONB column if it's a dict/list
+            if raw_samples and isinstance(raw_samples, (dict, list)):
+                import json
+                raw_samples_json = json.dumps(raw_samples)
+                app.logger.debug(f'POST /round - Converted rawSamples to JSON string')
+            else:
+                raw_samples_json = raw_samples
+            
             try:
                 round_result = db.run(
                     '''INSERT INTO "golfRounds" ("playerID", "courseID", "roundStartTimestamp", "totalScore", "rawSamples", "isPreview", "previewSwings", "previewPutts")
@@ -1126,7 +1134,7 @@ def round_endpoint():
                     course_id=course_id,
                     timestamp=round_timestamp,
                     total_score=total_score,
-                    raw_samples=raw_samples,
+                    raw_samples=raw_samples_json,
                     is_preview=is_preview,
                     preview_swings=preview_swings,
                     preview_putts=preview_putts
