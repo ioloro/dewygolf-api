@@ -1015,6 +1015,7 @@ def round_endpoint():
     POST: Create a new round with hole-by-hole data
     GET: Query rounds by user, course, or round ID
     """
+    app.logger.info(f'=== /round endpoint called - Method: {request.method}, IP: {request.remote_addr} ===')
     db = get_db()
     
     try:
@@ -1022,10 +1023,16 @@ def round_endpoint():
         # POST - Create new round
         # ===============================================================
         if request.method == 'POST':
+            app.logger.info('POST /round - Starting round creation process')
+            
             data = request.get_json()
             
             if not data:
+                app.logger.warning('POST /round - No JSON data provided in request body')
                 return jsonify({'success': False, 'error': 'No data provided'}), 400
+            
+            # Log received data structure (without sensitive info)
+            app.logger.debug(f'POST /round - Received data keys: {list(data.keys())}')
             
             # Validate required fields
             player_id = data.get('playerID')
@@ -1037,90 +1044,138 @@ def round_endpoint():
             preview_putts = data.get('previewPutts')
             round_timestamp = data.get('roundStartTimestamp')
             
+            app.logger.info(f'POST /round - Extracted fields: player_id={player_id}, course_id={course_id}, '
+                          f'holes_count={len(holes_data)}, is_preview={is_preview}, '
+                          f'has_raw_samples={bool(raw_samples)}, preview_swings={preview_swings}, '
+                          f'preview_putts={preview_putts}, timestamp={round_timestamp}')
+            
             if not round_timestamp:
                 round_timestamp = datetime.utcnow().isoformat()
+                app.logger.debug(f'POST /round - No timestamp provided, using current time: {round_timestamp}')
             
+            # Validate required fields
             if not player_id:
+                app.logger.warning('POST /round - Validation failed: playerID is missing')
                 return jsonify({'success': False, 'error': 'playerID is required'}), 400
             if not course_id:
+                app.logger.warning('POST /round - Validation failed: courseID is missing')
                 return jsonify({'success': False, 'error': 'courseID is required'}), 400
             if not holes_data and not is_preview: #Preview cannot/will not have holes
+                app.logger.warning('POST /round - Validation failed: holes array is missing (non-preview round)')
                 return jsonify({'success': False, 'error': 'holes array is required'}), 400
             
+            app.logger.info(f'POST /round - Validation passed, proceeding with player verification')
+            
             # Verify player exists and matches API key
+            app.logger.debug(f'POST /round - Querying database for player_id={player_id}')
             player_check = db.run(
                 'SELECT id, "apiKey" FROM users WHERE id = :player_id',
                 player_id=player_id
             )
             
             if not player_check:
+                app.logger.warning(f'POST /round - Player not found: player_id={player_id}')
                 return jsonify({'success': False, 'error': 'Player not found'}), 404
+            
+            app.logger.info(f'POST /round - Player found, verifying API key authorization')
             
             # Security check: ensure player can only create rounds for themselves
             player_api_key = player_check[0][1] if isinstance(player_check[0], (list, tuple)) else player_check[0]['apiKey']
             if player_api_key != g.apiKey:
+                app.logger.error(f'POST /round - SECURITY: Unauthorized attempt to create round for different user')
                 log_security_event('UNAUTHORIZED_ROUND_CREATE', 
                     f'Attempt to create round for different user: player_id={player_id}')
                 return jsonify({'success': False, 'error': 'Unauthorized: Cannot create rounds for other players'}), 403
             
+            app.logger.info(f'POST /round - Authorization verified, checking course existence')
+            
             # Verify course exists
+            app.logger.debug(f'POST /round - Querying database for course_id={course_id}')
             course_check = db.run(
                 'SELECT id FROM golfcourse WHERE id = :course_id',
                 course_id=course_id
             )
             
             if not course_check:
+                app.logger.warning(f'POST /round - Course not found: course_id={course_id}')
                 return jsonify({'success': False, 'error': 'Course not found'}), 404
+            
+            app.logger.info(f'POST /round - Course verified, calculating total score')
             
             # Calculate total score
             total_score = sum(hole.get('score', 0) for hole in holes_data if hole.get('score'))
+            app.logger.debug(f'POST /round - Calculated total_score={total_score} from {len(holes_data)} holes')
             
             # Get timestamp
             round_timestamp = data.get('roundStartTimestamp')
             if not round_timestamp:
                 round_timestamp = datetime.utcnow().isoformat()
+                app.logger.debug(f'POST /round - Using generated timestamp: {round_timestamp}')
             
             # Insert round
-            round_result = db.run(
-                '''INSERT INTO "golfRounds" ("playerID", "courseID", "roundStartTimestamp", "totalScore", "rawSamples", "isPreview", "previewSwings", "previewPutts")
-                   VALUES (:player_id, :course_id, :timestamp, :total_score, :raw_samples, :is_preview, :preview_swings, :preview_putts)
-                   RETURNING id''',
-                player_id=player_id,
-                course_id=course_id,
-                timestamp=round_timestamp,
-                total_score=total_score,
-                raw_samples=raw_samples,
-                is_preview=is_preview,
-                preview_swings=preview_swings,
-                preview_putts=preview_putts
-            )
+            app.logger.info(f'POST /round - Inserting round into database')
+            app.logger.debug(f'POST /round - Insert params: player_id={player_id}, course_id={course_id}, '
+                           f'timestamp={round_timestamp}, total_score={total_score}, is_preview={is_preview}')
+            
+            try:
+                round_result = db.run(
+                    '''INSERT INTO "golfRounds" ("playerID", "courseID", "roundStartTimestamp", "totalScore", "rawSamples", "isPreview", "previewSwings", "previewPutts")
+                       VALUES (:player_id, :course_id, :timestamp, :total_score, :raw_samples, :is_preview, :preview_swings, :preview_putts)
+                       RETURNING id''',
+                    player_id=player_id,
+                    course_id=course_id,
+                    timestamp=round_timestamp,
+                    total_score=total_score,
+                    raw_samples=raw_samples,
+                    is_preview=is_preview,
+                    preview_swings=preview_swings,
+                    preview_putts=preview_putts
+                )
+                app.logger.debug(f'POST /round - Round insert query executed successfully')
+            except Exception as insert_error:
+                app.logger.error(f'POST /round - Database insert error: {str(insert_error)}', exc_info=True)
+                return jsonify({'success': False, 'error': f'Database error: {str(insert_error)}'}), 500
             
             round_id = round_result[0][0] if round_result else None
             
             if not round_id:
+                app.logger.error('POST /round - FAILED: Round insert returned no ID')
                 return jsonify({'success': False, 'error': 'Failed to create round'}), 500
 
-            app.logger.info(f'Created new round: round_id={round_id}, player_id={player_id}, course_id={course_id}, is_preview={is_preview}')
+            app.logger.info(f'POST /round - SUCCESS: Created round with round_id={round_id}')
             
             # Insert hole-by-hole data
+            app.logger.info(f'POST /round - Starting hole insertion for {len(holes_data)} holes')
             holes_inserted = 0
-            for hole_data in holes_data:
+            holes_skipped = 0
+            
+            for idx, hole_data in enumerate(holes_data):
                 hole_id = hole_data.get('holeID')
                 score = hole_data.get('score')
                 
+                app.logger.debug(f'POST /round - Processing hole {idx+1}/{len(holes_data)}: hole_id={hole_id}, score={score}')
+                
                 if not hole_id:
-                    app.logger.warning(f'Skipping hole without holeID in round {round_id}')
+                    holes_skipped += 1
+                    app.logger.warning(f'POST /round - Skipping hole {idx+1}: missing holeID')
                     continue
                 
                 # Verify hole exists and belongs to the course
-                hole_check = db.run(
-                    'SELECT id FROM "golfHoles" WHERE id = :hole_id AND "courseID" = :course_id',
-                    hole_id=hole_id,
-                    course_id=course_id
-                )
+                app.logger.debug(f'POST /round - Verifying hole {hole_id} belongs to course {course_id}')
+                try:
+                    hole_check = db.run(
+                        'SELECT id FROM "golfHoles" WHERE id = :hole_id AND "courseID" = :course_id',
+                        hole_id=hole_id,
+                        course_id=course_id
+                    )
+                except Exception as hole_check_error:
+                    app.logger.error(f'POST /round - Error checking hole {hole_id}: {str(hole_check_error)}')
+                    holes_skipped += 1
+                    continue
                 
                 if not hole_check:
-                    app.logger.warning(f'Hole {hole_id} not found or does not belong to course {course_id}')
+                    holes_skipped += 1
+                    app.logger.warning(f'POST /round - Skipping hole {idx+1}: hole_id={hole_id} not found or does not belong to course {course_id}')
                     continue
                 
                 # Prepare optional fields
@@ -1130,53 +1185,78 @@ def round_endpoint():
                 putts = hole_data.get('putts')
                 penalty_strokes = hole_data.get('penaltyStrokes')
                 
+                app.logger.debug(f'POST /round - Hole {idx+1} optional fields: has_path={bool(path_geojson)}, '
+                               f'has_samples={bool(samples)}, fairway_hit={fairway_hit}, putts={putts}, penalty_strokes={penalty_strokes}')
+                
                 # Convert GeoJSON to string if it's a dict
                 if isinstance(path_geojson, dict):
                     import json
                     path_geojson = json.dumps(path_geojson)
+                    app.logger.debug(f'POST /round - Converted pathGeoJSON dict to JSON string for hole {idx+1}')
                 
-                db.run(
-                    '''INSERT INTO "golfRoundsHoles" 
-                       ("roundID", "holeID", score, "pathGeoJSON", samples, "fairwayHit", putts, "penaltyStrokes")
-                       VALUES (:round_id, :hole_id, :score, :path_geojson, :samples, :fairway_hit, :putts, :penalty_strokes)''',
-                    round_id=round_id,
-                    hole_id=hole_id,
-                    score=score,
-                    path_geojson=path_geojson,
-                    samples=samples,
-                    fairway_hit=fairway_hit,
-                    putts=putts,
-                    penalty_strokes=penalty_strokes
-                )
-                holes_inserted += 1
+                app.logger.debug(f'POST /round - Inserting hole {idx+1} data into golfRoundsHoles table')
+                try:
+                    db.run(
+                        '''INSERT INTO "golfRoundsHoles" 
+                           ("roundID", "holeID", score, "pathGeoJSON", samples, "fairwayHit", putts, "penaltyStrokes")
+                           VALUES (:round_id, :hole_id, :score, :path_geojson, :samples, :fairway_hit, :putts, :penalty_strokes)''',
+                        round_id=round_id,
+                        hole_id=hole_id,
+                        score=score,
+                        path_geojson=path_geojson,
+                        samples=samples,
+                        fairway_hit=fairway_hit,
+                        putts=putts,
+                        penalty_strokes=penalty_strokes
+                    )
+                    holes_inserted += 1
+                    app.logger.debug(f'POST /round - Successfully inserted hole {idx+1}')
+                except Exception as hole_insert_error:
+                    app.logger.error(f'POST /round - Failed to insert hole {idx+1}: {str(hole_insert_error)}', exc_info=True)
+                    holes_skipped += 1
             
-            app.logger.info(f'Inserted {holes_inserted} holes for round {round_id}')
+            app.logger.info(f'POST /round - Hole insertion complete: {holes_inserted} inserted, {holes_skipped} skipped')
             
             # Update user's single game count
-            db.run(
-                'UPDATE users SET "singleGameCount" = "singleGameCount" + 1 WHERE id = :player_id',
-                player_id=player_id
-            )
+            app.logger.info(f'POST /round - Updating singleGameCount for player {player_id}')
+            try:
+                db.run(
+                    'UPDATE users SET "singleGameCount" = "singleGameCount" + 1 WHERE id = :player_id',
+                    player_id=player_id
+                )
+                app.logger.info(f'POST /round - Successfully incremented singleGameCount for player {player_id}')
+            except Exception as count_error:
+                app.logger.error(f'POST /round - Failed to update singleGameCount: {str(count_error)}')
+                # Don't fail the request for this
             
-            return jsonify({
+            response_data = {
                 'success': True,
                 'round_id': round_id,
                 'holes_saved': holes_inserted,
                 'total_score': total_score,
                 'is_preview': is_preview
-            }), 201
+            }
+            app.logger.info(f'POST /round - COMPLETE: Returning success response: {response_data}')
+            
+            return jsonify(response_data), 201
         
         # ===============================================================
         # GET - Query rounds
         # ===============================================================
         else:  # GET
+            app.logger.info('GET /round - Starting round query')
+            
             round_id = request.args.get('roundID')
             player_id = request.args.get('playerID')
             course_id = request.args.get('courseID')
             limit = int(request.args.get('limit', 50))
             
+            app.logger.info(f'GET /round - Query params: round_id={round_id}, player_id={player_id}, '
+                          f'course_id={course_id}, limit={limit}')
+            
             # Ensure at least one query parameter
             if not any([round_id, player_id, course_id]):
+                app.logger.warning('GET /round - No query parameters provided')
                 return jsonify({
                     'success': False,
                     'error': 'Please provide at least one query parameter: roundID, playerID, or courseID'
@@ -1184,6 +1264,7 @@ def round_endpoint():
             
             # Build query based on parameters
             if round_id:
+                app.logger.info(f'GET /round - Querying by roundID: {round_id}')
                 # Query specific round
                 rounds = db.run(
                     '''SELECT r.id, r."playerID", r."courseID", r."roundStartTimestamp", r."totalScore",
@@ -1196,6 +1277,7 @@ def round_endpoint():
                     round_id=round_id
                 )
             elif player_id:
+                app.logger.info(f'GET /round - Querying by playerID: {player_id}')
                 # Query by player
                 rounds = db.run(
                     '''SELECT r.id, r."playerID", r."courseID", r."roundStartTimestamp", r."totalScore",
@@ -1211,6 +1293,7 @@ def round_endpoint():
                     limit=limit
                 )
             else:  # course_id
+                app.logger.info(f'GET /round - Querying by courseID: {course_id}')
                 # Query by course
                 rounds = db.run(
                     '''SELECT r.id, r."playerID", r."courseID", r."roundStartTimestamp", r."totalScore",
@@ -1226,7 +1309,10 @@ def round_endpoint():
                     limit=limit
                 )
             
+            app.logger.info(f'GET /round - Query returned {len(rounds) if rounds else 0} rounds')
+            
             if not rounds:
+                app.logger.info('GET /round - No rounds found, returning empty result')
                 return jsonify({
                     'success': True,
                     'rounds': [],
@@ -1234,8 +1320,12 @@ def round_endpoint():
                 })
             
             # Convert rounds to dictionaries and fetch hole data
+            app.logger.info(f'GET /round - Processing {len(rounds)} rounds with hole data')
             results = []
-            for round_row in rounds:
+            
+            for round_idx, round_row in enumerate(rounds):
+                app.logger.debug(f'GET /round - Processing round {round_idx+1}/{len(rounds)}: round_id={round_row[0]}')
+                
                 round_dict = {
                     'id': round_row[0],
                     'playerID': round_row[1],
@@ -1247,19 +1337,25 @@ def round_endpoint():
                 }
                 
                 # Fetch hole-by-hole data for this round
-                holes = db.run(
-                    '''SELECT rh.id, rh."holeID", rh.score, rh."pathGeoJSON", rh.samples,
-                              rh."fairwayHit", rh.putts, rh."penaltyStrokes",
-                              h."holeNumber", h.par, h.distance
-                       FROM "golfRoundsHoles" rh
-                       JOIN "golfHoles" h ON rh."holeID" = h.id
-                       WHERE rh."roundID" = :round_id
-                       ORDER BY h."holeNumber"''',
-                    round_id=round_dict['id']
-                )
+                app.logger.debug(f'GET /round - Fetching holes for round {round_dict["id"]}')
+                try:
+                    holes = db.run(
+                        '''SELECT rh.id, rh."holeID", rh.score, rh."pathGeoJSON", rh.samples,
+                                  rh."fairwayHit", rh.putts, rh."penaltyStrokes",
+                                  h."holeNumber", h.par, h.distance
+                           FROM "golfRoundsHoles" rh
+                           JOIN "golfHoles" h ON rh."holeID" = h.id
+                           WHERE rh."roundID" = :round_id
+                           ORDER BY h."holeNumber"''',
+                        round_id=round_dict['id']
+                    )
+                    app.logger.debug(f'GET /round - Found {len(holes) if holes else 0} holes for round {round_dict["id"]}')
+                except Exception as holes_error:
+                    app.logger.error(f'GET /round - Error fetching holes for round {round_dict["id"]}: {str(holes_error)}')
+                    holes = []
                 
                 round_dict['holes'] = []
-                for hole_row in holes:
+                for hole_idx, hole_row in enumerate(holes):
                     hole_dict = {
                         'id': hole_row[0],
                         'holeID': hole_row[1],
@@ -1274,24 +1370,30 @@ def round_endpoint():
                         'distance': hole_row[10]
                     }
                     round_dict['holes'].append(hole_dict)
+                    app.logger.debug(f'GET /round - Added hole {hole_idx+1}/{len(holes)} (hole#{hole_dict["holeNumber"]}) to round')
                 
                 results.append(round_dict)
             
-            return jsonify({
+            response = {
                 'success': True,
                 'rounds': results,
                 'total_found': len(results)
-            })
+            }
+            app.logger.info(f'GET /round - COMPLETE: Returning {len(results)} rounds with hole data')
+            
+            return jsonify(response)
     
     except Exception as e:
-        app.logger.error(f'Error in round endpoint: {str(e)}', exc_info=True)
+        app.logger.error(f'ERROR in /round endpoint: {str(e)}', exc_info=True)
+        app.logger.error(f'Error details - Method: {request.method}, Args: {request.args}, Has JSON: {request.is_json}')
         return jsonify({'success': False, 'error': 'Internal server error'}), 500
     finally:
         try:
+            app.logger.debug('Closing database connection')
             db.close()
-        except:
+        except Exception as close_error:
+            app.logger.warning(f'Error closing database: {str(close_error)}')
             pass
-
 
 # ============================================================================
 # GOLF COURSE DETAILS ENDPOINT
