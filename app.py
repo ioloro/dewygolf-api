@@ -1042,14 +1042,15 @@ def round_endpoint():
             holes_data = data.get('holes', [])
             raw_samples = data.get('rawSamples')
             is_preview = data.get('isPreview', False)
-            preview_swings = data.get('previewSwings')
+            preview_drives = data.get('previewDrives')
+            preview_chips = data.get('previewChips')
             preview_putts = data.get('previewPutts')
             round_timestamp = data.get('roundStartTimestamp')
             
             app.logger.info(f'POST /round - Extracted fields: player_id={player_id}, course_id={course_id}, '
                           f'holes_count={len(holes_data)}, is_preview={is_preview}, '
-                          f'has_raw_samples={bool(raw_samples)}, preview_swings={preview_swings}, '
-                          f'preview_putts={preview_putts}, timestamp={round_timestamp}')
+                          f'has_raw_samples={bool(raw_samples)}, preview_drives={preview_drives}, '
+                          f'preview_chips={preview_chips}, preview_putts={preview_putts}, timestamp={round_timestamp}')
             
             if not round_timestamp:
                 round_timestamp = datetime.utcnow().isoformat()
@@ -1129,8 +1130,8 @@ def round_endpoint():
             
             try:
                 round_result = db.run(
-                    '''INSERT INTO "golfRounds" ("playerID", "courseID", "roundStartTimestamp", "totalScore", "rawSamples", "isPreview", "previewSwings", "previewPutts")
-                       VALUES (:player_id, :course_id, :timestamp, :total_score, :raw_samples, :is_preview, :preview_swings, :preview_putts)
+                    '''INSERT INTO "golfRounds" ("playerID", "courseID", "roundStartTimestamp", "totalScore", "rawSamples", "isPreview", "previewDrives", "previewChips", "previewPutts")
+                       VALUES (:player_id, :course_id, :timestamp, :total_score, :raw_samples, :is_preview, :preview_drives, :preview_chips, :preview_putts)
                        RETURNING id''',
                     player_id=player_id,
                     course_id=course_id,
@@ -1138,7 +1139,8 @@ def round_endpoint():
                     total_score=total_score,
                     raw_samples=raw_samples_json,
                     is_preview=is_preview,
-                    preview_swings=preview_swings,
+                    preview_drives=preview_drives,
+                    preview_chips=preview_chips,
                     preview_putts=preview_putts
                 )
                 app.logger.debug(f'POST /round - Round insert query executed successfully')
@@ -1278,6 +1280,7 @@ def round_endpoint():
                 # Query specific round
                 rounds = db.run(
                     '''SELECT r.id, r."playerID", r."courseID", r."roundStartTimestamp", r."totalScore",
+                              r."isPreview", r."previewDrives", r."previewChips", r."previewPutts",
                               u."displayName" as player_name,
                               c.name as course_name
                        FROM "golfRounds" r
@@ -1291,6 +1294,7 @@ def round_endpoint():
                 # Query by player
                 rounds = db.run(
                     '''SELECT r.id, r."playerID", r."courseID", r."roundStartTimestamp", r."totalScore",
+                              r."isPreview", r."previewDrives", r."previewChips", r."previewPutts",
                               u."displayName" as player_name,
                               c.name as course_name
                        FROM "golfRounds" r
@@ -1307,6 +1311,7 @@ def round_endpoint():
                 # Query by course
                 rounds = db.run(
                     '''SELECT r.id, r."playerID", r."courseID", r."roundStartTimestamp", r."totalScore",
+                              r."isPreview", r."previewDrives", r."previewChips", r."previewPutts",
                               u."displayName" as player_name,
                               c.name as course_name
                        FROM "golfRounds" r
@@ -1342,8 +1347,12 @@ def round_endpoint():
                     'courseID': round_row[2],
                     'roundStartTimestamp': round_row[3],
                     'totalScore': round_row[4],
-                    'playerName': round_row[5],
-                    'courseName': round_row[6]
+                    'isPreview': round_row[5],
+                    'previewDrives': round_row[6],
+                    'previewChips': round_row[7],
+                    'previewPutts': round_row[8],
+                    'playerName': round_row[9],
+                    'courseName': round_row[10]
                 }
                 
                 # Fetch hole-by-hole data for this round
